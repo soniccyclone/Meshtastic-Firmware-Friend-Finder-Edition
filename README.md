@@ -121,14 +121,16 @@ For the Friend Finder module to work, specific hardware is required.
 | **SDA** | -> | **GPIO 41** | |
 | **SCL** | -> | **GPIO 42** | |
 
-#### LilyGo T-LoRa T3-S3 V1 (Unconfirmed)
+#### LilyGo T-LoRa T3-S3 V1 (Confirmed)
 | Magnetometer | Pin | T-LoRa S3 | Pin |
 | :--- | :---: | :--- | ---: |
 | **SDA** | -> | **GPIO 43** | |
 | **SCL** | -> | **GPIO 44** | |
 
 > **T3-S3 Notes:**
-> NULLVOID ADD NOTES HERE :)
+> An Igmopnrq GY-271 (QMC5883L) magnetometer purchased from AliExpress was connected via the Qwiic I²C port using pins 43 and 44. A set of 10 Qwiic I²C cables was purchased from Amazon, as it was more cost-effective than buying individual cables.
+If you prefer not to buy Qwiic connector cables, you can solder normal cables directly to the Qwiic port; however, this may limit its usefulness for future applications.
+Testing went well the board appears to function the same as the Heltec V3 when running the Friend Finder firmware.
 
 #### Finding Pins on Other Devices
 To find the correct I²C pins for an unsupported ESP32-S3 board, you must look in the firmware source code for the board's variant file.
