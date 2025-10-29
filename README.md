@@ -108,20 +108,20 @@ For the Friend Finder module to work, specific hardware is required.
 
 | Component | Model / Specification | Notes |
 | :--- | :--- | :--- |
-| **Primary Device**| Heltec Wireless Tracker (V3), LilyGo T-LoRa T3-S3 V1 | Other ESP32-S3 devices may work but require individual testing. |
+| **Primary Device**| Heltec (V3), LilyGo T-LoRa T3-S3 V1 | Other ESP32-S3 devices may work but require individual testing. |
 | **GPS Module** | Any Meshtastic-compatible GPS | **Required.** Any module supported by the base firmware will work. The u-blox M8N is recommended for its high accuracy. |
 | **Magnetometer** | QMC5883L | **Highly Recommended.** The directional arrow makes finding friends in crowded spaces much easier. Other magnetometers may work but are untested. |
 
 > **IMPORTANT: Magnetometer Wiring**
 > The correct I²C pins vary by device. Here are the confirmed wiring configurations. The firmware is designed to use the **secondary I²C bus** (`I2C1`) where available.
 
-#### Heltec Wireless Tracker (V3)
+#### Heltec (V3) (Confirmed)
 | Magnetometer | Pin | Heltec V3 | Pin |
 | :--- | :---: | :--- | ---: |
 | **SDA** | -> | **GPIO 41** | |
 | **SCL** | -> | **GPIO 42** | |
 
-#### LilyGo T-LoRa T3-S3 V1
+#### LilyGo T-LoRa T3-S3 V1 (Unconfirmed)
 | Magnetometer | Pin | T-LoRa S3 | Pin |
 | :--- | :---: | :--- | ---: |
 | **SDA** | -> | **GPIO 43** | |
