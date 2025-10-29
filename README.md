@@ -127,6 +127,9 @@ For the Friend Finder module to work, specific hardware is required.
 | **SDA** | -> | **GPIO 43** | |
 | **SCL** | -> | **GPIO 44** | |
 
+> **T3-S3 Notes**
+> NULLVOID ADD NOTES HERE :)
+
 #### Finding Pins on Other Devices
 To find the correct I²C pins for an unsupported ESP32-S3 board, you must look in the firmware source code for the board's variant file.
 1.  Navigate to the variants directory in the source code. The path will be similar to `firmware/src/variants/esp32s3/your_board_name/`.
