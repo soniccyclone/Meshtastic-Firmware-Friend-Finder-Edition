@@ -127,7 +127,7 @@ For the Friend Finder module to work, specific hardware is required.
 | **SDA** | -> | **GPIO 43** | |
 | **SCL** | -> | **GPIO 44** | |
 
-> **T3-S3 Notes**
+> **T3-S3 Notes: **
 > NULLVOID ADD NOTES HERE :)
 
 #### Finding Pins on Other Devices
