@@ -11,6 +11,7 @@
 ![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)
 ![Version](https://img.shields.io/badge/Version-2.7--FF-brightgreen)
 ![Hardware](https://img.shields.io/badge/Tested_On-Heltec_V3,_T--LoRa_T3--S3-orange)
+![T114](https://img.shields.io/badge/Experimental-Heltec_T114_(nRF52840)-blueviolet)
 ![Status](https://img.shields.io/badge/Status-Work_In_Progress-yellow)
 
 </div>
@@ -108,7 +109,8 @@ For the Friend Finder module to work, specific hardware is required.
 
 | Component | Model / Specification | Notes |
 | :--- | :--- | :--- |
-| **Primary Device**| Heltec (V3), LilyGo T-LoRa T3-S3 V1 | Other ESP32-S3 devices may work but require individual testing. |
+| **Primary Device** | Heltec (V3), Heltec (V4), LilyGo T-LoRa T3-S3 V1 | Other ESP32-S3 devices may work but require individual testing. |
+| **Primary Device (Experimental)** | Heltec T114 (nRF52840) | Experimental support. Flashed via UF2, not serial. See the [T114 section](#heltec-t114-nrf52840-experimental) below. |
 | **GPS Module** | Any Meshtastic-compatible GPS | **Required.** Any module supported by the base firmware will work. The u-blox M8N is recommended for its high accuracy. |
 | **Magnetometer** | QMC5883L | **Highly Recommended.** The directional arrow makes finding friends in crowded spaces much easier. Other magnetometers may work but are untested. |
 
@@ -132,8 +134,26 @@ For the Friend Finder module to work, specific hardware is required.
 If you prefer not to buy Qwiic connector cables, you can solder normal cables directly to the Qwiic port; however, this may limit its usefulness for future applications.
 Testing went well the board appears to function the same as the Heltec V3 when running the Friend Finder firmware.
 
+#### Heltec T114 (nRF52840) — Experimental
+
+> **Note:** T114 support is experimental. The firmware compiles against the Meshtastic T114 variant and the QMC5883L driver uses the secondary I²C bus wired via the header pins exposed by [meshtastic/firmware PR #4745](https://github.com/meshtastic/firmware/pull/4745).
+
+| Magnetometer | Pin | Heltec T114 | Pin |
+| :--- | :---: | :--- | ---: |
+| **SDA** | -> | **P0.16** | |
+| **SCL** | -> | **P0.13** | |
+
+##### Flashing the T114
+
+The T114 uses an nRF52840 MCU with an Adafruit-compatible UF2 bootloader. It **cannot** be flashed via the web flasher's serial method. Instead:
+
+1. Double-press the **reset button** on the T114. A USB drive (e.g. `T114_BOOT`) will appear on your computer.
+2. Download the `firmware.uf2` file from the [web flasher](https://leapyeet.github.io/Meshtastic-Firmware-Friend-Finder-Edition/) by selecting **Heltec T114** in the dropdown.
+3. Drag and drop the `.uf2` file onto the USB drive.
+4. The device will flash automatically and reboot.
+
 #### Finding Pins on Other Devices
-To find the correct I²C pins for an unsupported ESP32-S3 board, you must look in the firmware source code for the board's variant file.
+To find the correct I²C pins for an unsupported ESP32-S3 board, look in the firmware source code for the board's variant file.
 1.  Navigate to the variants directory in the source code. The path will be similar to `firmware/src/variants/esp32s3/your_board_name/`.
 2.  Open the `variant.h` file.
 3.  Search for the following definitions to find the correct GPIO pin numbers for the secondary I²C bus:
@@ -141,6 +161,8 @@ To find the correct I²C pins for an unsupported ESP32-S3 board, you must look i
     #define I2C_SDA1 SDA
     #define I2C_SCL1 SCL
     ```
+
+For **nRF52840** boards (like the T114), the variant file lives under `firmware/src/variants/nrf52/your_board_name/` instead.
 
 ---
 

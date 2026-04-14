@@ -1,0 +1,93 @@
+name: Build & Release T114 Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (e.g. v2.7-FF-t114-1)"
+        required: true
+        default: "v2.7-FF-t114-1"
+      prerelease:
+        description: "Mark as pre-release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout flasher repo
+        uses: actions/checkout@v4
+        with:
+          path: flasher
+
+      - name: Checkout firmware source (LeapYeet/firmware)
+        uses: actions/checkout@v4
+        with:
+          repository: LeapYeet/firmware
+          path: firmware-src
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Cache the PlatformIO home directory so the nRF52 platform + toolchain
+      # (~500 MB) only downloads on the first run or when platformio.ini changes.
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-nrf52-${{ hashFiles('firmware-src/platformio.ini') }}
+          restore-keys: pio-nrf52-
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build heltec-mesh-node-t114
+        working-directory: firmware-src
+        run: pio run --environment heltec-mesh-node-t114
+
+      - name: Copy UF2 into flasher repo
+        run: |
+          cp firmware-src/.pio/build/heltec-mesh-node-t114/firmware.uf2 \
+             flasher/firmware/heltec_t114/firmware.uf2
+
+      - name: Commit UF2 to flasher repo
+        working-directory: flasher
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add firmware/heltec_t114/firmware.uf2
+          # Only commit if the binary actually changed
+          git diff --staged --quiet || \
+            git commit -m "chore: update T114 firmware binary [${{ inputs.version }}]"
+          git push
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: "Friend Finder ${{ inputs.version }}"
+          prerelease: ${{ inputs.prerelease }}
+          body: |
+            ## Meshtastic Friend Finder ${{ inputs.version }}
+
+            ### Heltec T114 (nRF52840) — Experimental
+
+            Flash the attached `firmware.uf2` using the UF2 bootloader:
+
+            1. Double-press the reset button on the T114 — a USB drive named `T114_BOOT` (or similar) will appear on your computer.
+            2. Drag and drop `firmware.uf2` onto that drive.
+            3. The device flashes automatically and reboots into the new firmware.
+
+            The [web flasher](https://leapyeet.github.io/Meshtastic-Firmware-Friend-Finder-Edition/) also serves this file via the **Heltec T114** dropdown.
+
+            See the [README](https://github.com/${{ github.repository }}/blob/main/README.md#heltec-t114-nrf52840--experimental) for full wiring and setup instructions.
+          files: flasher/firmware/heltec_t114/firmware.uf2
