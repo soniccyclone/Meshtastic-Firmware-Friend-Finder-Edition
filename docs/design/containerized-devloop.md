@@ -22,8 +22,14 @@ A Podman-based build environment that:
 
 ## Architecture
 
+**Host platform: linux/amd64** (x86_64 WSL2). The container image is `linux/amd64` — native to the host, no emulation anywhere in the stack.
+
+The T114 target being ARM does not require an ARM container. `arm-none-eabi-gcc` is a cross-compiler: an x86_64 binary that outputs ARM Cortex-M4 machine code. The container architecture (what the toolchain runs on) and the output architecture (what the firmware runs on) are independent. Running an arm64 container via QEMU on an x86_64 host would add emulation overhead with zero benefit.
+
+This also means the locally-built image and GitHub Actions `ubuntu-latest` runners share the same architecture — no arm64 runners or multi-arch builds needed.
+
 ```
-Host filesystem
+Host filesystem (linux/amd64, x86_64 WSL2)
   firmware-src/          ← git clone of LeapYeet/firmware (done once)
   Meshtastic-Firmware-Friend-Finder-Edition/
     Containerfile        ← image definition
@@ -31,7 +37,7 @@ Host filesystem
     docs/
     firmware/heltec_t114/firmware.uf2  ← artifact lands here
 
-Podman container (ff-builder image)
+Podman container (ff-builder image, linux/amd64)
   /firmware-src/         ← bind-mount from host (read-write)
   /output/               ← bind-mount → host firmware/heltec_t114/
   ~/.platformio/         ← baked into image layer (toolchain pre-installed)
@@ -212,7 +218,7 @@ Build time after image is built: ~3–8 minutes (no network, pure compilation).
 
 ## GitHub Actions Integration
 
-Two options:
+The locally-built image is `linux/amd64`. GitHub Actions `ubuntu-latest` runners are also `linux/amd64`. The same image works in both places — no architecture mismatch to manage.
 
 **Option A — Publish image to GHCR, use it in CI.**  
 Push the image to `ghcr.io/<owner>/ff-builder:latest` and update the workflow to pull it:
@@ -220,7 +226,7 @@ Push the image to `ghcr.io/<owner>/ff-builder:latest` and update the workflow to
 ```yaml
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest    # x86_64 — matches the image
     container:
       image: ghcr.io/<owner>/ff-builder:latest
       credentials:
@@ -235,10 +241,10 @@ jobs:
       - run: cd firmware-src && /usr/local/bin/entrypoint.sh
 ```
 
-This eliminates the toolchain download from CI entirely. The image itself becomes the cache, versioned independently.
+This eliminates the toolchain download from CI entirely. The image itself becomes the cache, versioned independently of the workflow file.
 
 **Option B — Keep CI as-is for releases, use container locally for iteration.**  
-Fewer moving parts. CI stays unchanged; the container is purely a local development tool. This is the lower-risk starting point.
+Fewer moving parts. CI stays unchanged; the container is purely a local development tool. Given that releases are infrequent (manual `workflow_dispatch`), tolerating the slow CI path for the actual release publish while getting fast local iteration is a reasonable split. This is the lower-risk starting point.
 
 ## Key Design Decisions
 
@@ -259,8 +265,8 @@ Rebuild with `podman build --no-cache -t ff-builder .` when:
 
 ## Open Questions
 
-1. **Multi-target support.** The ESP32-S3 targets (Heltec V3/V4, T3-S3) use a different toolchain (Xtensa). A single image could serve all targets but would be ~1.5 GB. Alternatively, separate `ff-builder-nrf52` and `ff-builder-esp32` images keep each lean.
+1. **Multi-target support.** The ESP32-S3 targets (Heltec V3/V4, T3-S3) use a different toolchain (Xtensa). A single image could serve all targets but would be ~1.5 GB. Alternatively, separate `ff-builder-nrf52` and `ff-builder-esp32` images keep each lean. The Xtensa toolchain also has arm64 Linux packages, so the same native-build approach applies.
 
 2. **Submodule freshness.** The one-time clone of `LeapYeet/firmware` will drift from upstream. Decide whether to pin to a specific commit or run `git pull --recurse-submodules` before each build.
 
-3. **ARM cross-compilation on non-x86 hosts.** On an ARM Mac or Raspberry Pi the image will work via emulation (slow) or need a separate `linux/arm64` image variant. Most likely not a concern for this project.
+~~3. ARM cross-compilation on non-x86 hosts.~~ **Resolved.** Host is linux/amd64 (x86_64). The cross-compiler (`arm-none-eabi-gcc`) is an x86_64 binary — it runs natively on the host and outputs ARM firmware. No QEMU or emulation involved anywhere in the stack.
