@@ -1,0 +1,12 @@
+{
+  "name": "Meshtastic - Friend Finder (Heltec T114)",
+  "version": "2.7-FF",
+  "builds": [
+    {
+      "chipFamily": "nRF52840",
+      "parts": [
+        { "path": "firmware.uf2" }
+      ]
+    }
+  ]
+}

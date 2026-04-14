@@ -161,6 +161,55 @@
             margin-bottom: 8px;
         }
 
+        .uf2-section {
+            margin-top: 20px;
+        }
+
+        .uf2-notice {
+            background-color: #e8f4fd;
+            border-left: 4px solid #007bff;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            font-size: 0.95em;
+            text-align: left;
+        }
+
+        .uf2-notice p {
+            margin: 0 0 8px 0;
+        }
+
+        .uf2-notice p:last-child {
+            margin-bottom: 0;
+        }
+
+        .uf2-notice ol {
+            margin: 8px 0 0 0;
+        }
+
+        .uf2-download-button {
+            display: inline-block;
+            background-color: var(--primary-color);
+            color: white;
+            font-family: 'Poppins', sans-serif;
+            font-size: 1.2em;
+            font-weight: 600;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background-color 0.3s ease, transform 0.2s ease;
+            box-shadow: 0 2px 8px rgba(0, 123, 255, 0.3);
+        }
+
+        .uf2-download-button:hover {
+            background-color: #0056b3;
+            transform: translateY(-2px);
+            text-decoration: none;
+            color: white;
+        }
+
         a {
             color: var(--primary-color);
             text-decoration: none;
@@ -207,6 +256,20 @@
                 <p><strong>Important:</strong> The "skip erase" feature will be added soon. For now, flashing the firmware will perform a <strong>full erase</strong> of the device.</p>
                 <p>Please back up your settings and channel keys using the Meshtastic app or CLI before you proceed.</p>
             </div>
+
+            <div id="uf2-section" class="uf2-section" style="display:none;">
+                <div class="uf2-notice">
+                    <p><strong>nRF52840 device — UF2 flashing required.</strong> The T114 cannot be flashed via serial. Instead, download the UF2 file and copy it onto the device's bootloader drive.</p>
+                    <p><strong>Steps:</strong></p>
+                    <ol>
+                        <li>Double-press the reset button on the T114. A USB drive named <code>T114_BOOT</code> (or similar) will appear on your computer.</li>
+                        <li>Download the UF2 firmware file using the button below.</li>
+                        <li>Drag and drop the <code>.uf2</code> file onto that USB drive.</li>
+                        <li>The device will flash automatically and reboot into the new firmware.</li>
+                    </ol>
+                </div>
+                <a id="uf2-download-btn" href="firmware/heltec_t114/firmware.uf2" download="firmware-heltec-t114-2.7-FF.uf2" class="uf2-download-button">2. Download UF2 Firmware</a>
+            </div>
         </div>
 
         <div class="section">
@@ -233,7 +296,7 @@
         <div class="section">
             <h2>⚙️ Hardware Requirements</h2>
             <p>
-                This firmware is designed for ESP32-S3 devices like the <strong>Heltec V3</strong>, <strong>Heltec V4</strong>, or <strong>LILYGO T-Lora T3-S3</strong> and requires a <strong>GPS module</strong> to function. For the directional arrow feature, a <strong>QMC5883L magnetometer</strong> is also needed.
+                This firmware supports <strong>Heltec V3</strong>, <strong>Heltec V4</strong>, <strong>LILYGO T-Lora T3-S3</strong>, and (experimentally) the <strong>Heltec T114</strong>. All devices require a <strong>GPS module</strong> to function. For the directional arrow feature, a <strong>QMC5883L magnetometer</strong> is also needed.
             </p>
             <p>
                 <strong>Recommended Magnetometer Pins (SDA / SCL):</strong>
@@ -241,6 +304,7 @@
                     <li><strong>Heltec V3:</strong> 41 / 42 (Confirmed)</li>
                     <li><strong>Heltec V4:</strong> 17 / 18 (Possible)</li>
                     <li><strong>LILYGO T-Lora T3-S3:</strong> 18 / 17 or 43 / 44 (Varies)</li>
+                    <li><strong>Heltec T114:</strong> P0.16 / P0.13 (Experimental)</li>
                 </ul>
             </p>
             <p>
@@ -300,18 +364,43 @@
             const devices = [
                 {
                     name: "Heltec V3",
-                    manifest: "firmware/heltec_v3/manifest.json"
+                    manifest: "firmware/heltec_v3/manifest.json",
+                    chipFamily: "ESP32-S3"
                 },
                 {
                     name: "LILYGO T-Lora T3-S3",
-                    manifest: "firmware/tlora_t3s3_v1/manifest.json"
+                    manifest: "firmware/tlora_t3s3_v1/manifest.json",
+                    chipFamily: "ESP32-S3"
                 },
                 {
                     name: "Heltec V4",
-                    manifest: "firmware/heltec_v4/manifest.json"
+                    manifest: "firmware/heltec_v4/manifest.json",
+                    chipFamily: "ESP32-S3"
+                },
+                {
+                    name: "Heltec T114 (nRF52840) — Experimental",
+                    manifest: "firmware/heltec_t114/manifest.json",
+                    chipFamily: "nRF52840",
+                    uf2: "firmware/heltec_t114/firmware.uf2"
                 }
-      
             ];
+
+            const uf2Section        = document.getElementById('uf2-section');
+            const optionsContainer  = document.querySelector('.options-container');
+            const backupNotice      = document.querySelector('.backup-notice');
+
+            function setDeviceMode(device) {
+                const isNrf52 = device.chipFamily === 'nRF52840';
+
+                flasherButton.style.display  = isNrf52 ? 'none' : '';
+                optionsContainer.style.display = isNrf52 ? 'none' : '';
+                backupNotice.style.display   = isNrf52 ? 'none' : '';
+                uf2Section.style.display     = isNrf52 ? 'block' : 'none';
+
+                if (!isNrf52) {
+                    flasherButton.manifest = device.manifest;
+                }
+            }
 
             // --- Logic to populate and manage the device dropdown ---
             devices.forEach(device => {
@@ -321,14 +410,15 @@
                 deviceSelect.appendChild(option);
             });
 
-            // Set the initial manifest path for the flasher when the page loads
+            // Set the initial mode when the page loads
             if (devices.length > 0) {
-                flasherButton.manifest = devices[0].manifest;
+                setDeviceMode(devices[0]);
             }
 
-            // Update the manifest path whenever the user selects a different device
+            // Update the mode whenever the user selects a different device
             deviceSelect.addEventListener('change', (event) => {
-                flasherButton.manifest = event.target.value;
+                const selected = devices.find(d => d.manifest === event.target.value);
+                if (selected) setDeviceMode(selected);
             });
 
             // Logic for the erase checkbox
