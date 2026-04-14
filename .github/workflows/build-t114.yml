@@ -50,6 +50,27 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
 
+      # SdFat (pulled in transitively via Adafruit TinyUSB MSC) uses `SS` as a
+      # default parameter in SdFat.h:57, but the heltec_mesh_node_t114 board
+      # variant does not define SS. Defining it as 0 satisfies the compiler;
+      # the value is never used at runtime because Meshtastic doesn't use SD
+      # cards on this target.
+      - name: Patch T114 variant — define SS for SdFat compilation
+        working-directory: firmware-src
+        run: |
+          python3 - <<'EOF'
+          path = "variants/nrf52840/heltec_mesh_node_t114/platformio.ini"
+          with open(path) as f:
+              content = f.read()
+          if "-DSS=" not in content:
+              content = content.replace("-DHELTEC_T114", "-DHELTEC_T114\n  -DSS=0")
+              with open(path, "w") as f:
+                  f.write(content)
+              print("Patched: added -DSS=0 to build_flags")
+          else:
+              print("Skipped: -DSS already defined")
+          EOF
+
       - name: Build heltec-mesh-node-t114
         working-directory: firmware-src
         run: pio run --environment heltec-mesh-node-t114
