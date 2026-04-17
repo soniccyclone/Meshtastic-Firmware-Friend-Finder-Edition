@@ -302,4 +302,12 @@ I love you all, have fun!
 
 ## 📜 License
 
-This project is a derivative work of the official Meshtastic firmware and is therefore licensed under the **GNU General Public License v3.0 (GPL-2.0)**. The original `LICENSE` file is included in the source code.
+This project is licensed under the **GNU General Public License v3.0 only (GPL-3.0-only)**. The full license text is in [LICENSE](LICENSE).
+
+It is a derivative work of:
+
+-   [LeapYeet/Meshtastic-Firmware-Friend-Finder-Edition](https://github.com/LeapYeet/Meshtastic-Firmware-Friend-Finder-Edition) — the upstream Friend Finder distribution (GPL-3.0)
+-   [LeapYeet/firmware](https://github.com/LeapYeet/firmware) — the Meshtastic firmware fork carrying the Friend Finder module (GPL-3.0)
+-   [meshtastic/firmware](https://github.com/meshtastic/firmware) — the official Meshtastic firmware (GPL-3.0)
+
+The firmware binaries distributed in this repository (e.g. [firmware/heltec_t114/firmware.uf2](firmware/heltec_t114/firmware.uf2)) are built from the source at [LeapYeet/firmware](https://github.com/LeapYeet/firmware) with the build-environment patches in [patch-t114.py](patch-t114.py) applied. Per GPL-3 §6, the corresponding source for any distributed binary is available at those upstream repositories plus this repository's patch scripts.
