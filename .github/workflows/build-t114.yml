@@ -21,75 +21,16 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout flasher repo
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          path: flasher
 
-      - name: Checkout firmware source (LeapYeet/firmware)
-        uses: actions/checkout@v4
-        with:
-          repository: LeapYeet/firmware
-          path: firmware-src
-          submodules: recursive
+      - name: Build ff-builder image
+        run: docker build -f Containerfile -t ff-builder .
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      # Cache the PlatformIO home directory so the nRF52 platform + toolchain
-      # (~500 MB) only downloads on the first run or when platformio.ini changes.
-      - name: Cache PlatformIO packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.platformio
-          key: pio-nrf52-${{ hashFiles('firmware-src/platformio.ini') }}
-          restore-keys: pio-nrf52-
-
-      - name: Install PlatformIO
-        run: pip install platformio
-
-      # SdFat (pulled in transitively via Adafruit TinyUSB MSC) uses `SS` as a
-      # default parameter in SdFat.h:57, but the heltec_mesh_node_t114 board
-      # variant does not define SS. Defining it as 0 satisfies the compiler;
-      # the value is never used at runtime because Meshtastic doesn't use SD
-      # cards on this target.
-      - name: Patch T114 variant — define SS for SdFat compilation
-        working-directory: firmware-src
+      - name: Compile T114 firmware
         run: |
-          python3 - <<'EOF'
-          path = "variants/nrf52840/heltec_mesh_node_t114/platformio.ini"
-          with open(path) as f:
-              content = f.read()
-          if "-DSS=" not in content:
-              content = content.replace("-DHELTEC_T114", "-DHELTEC_T114\n  -DSS=0")
-              with open(path, "w") as f:
-                  f.write(content)
-              print("Patched: added -DSS=0 to build_flags")
-          else:
-              print("Skipped: -DSS already defined")
-          EOF
-
-      - name: Build heltec-mesh-node-t114
-        working-directory: firmware-src
-        run: pio run --environment heltec-mesh-node-t114
-
-      - name: Copy UF2 into flasher repo
-        run: |
-          cp firmware-src/.pio/build/heltec-mesh-node-t114/firmware.uf2 \
-             flasher/firmware/heltec_t114/firmware.uf2
-
-      - name: Commit UF2 to flasher repo
-        working-directory: flasher
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add firmware/heltec_t114/firmware.uf2
-          # Only commit if the binary actually changed
-          git diff --staged --quiet || \
-            git commit -m "chore: update T114 firmware binary [${{ inputs.version }}]"
-          git push
+          mkdir -p output
+          docker run --rm -v "$PWD/output:/output" ff-builder
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -108,7 +49,5 @@ jobs:
             2. Drag and drop `firmware.uf2` onto that drive.
             3. The device flashes automatically and reboots into the new firmware.
 
-            The [web flasher](https://leapyeet.github.io/Meshtastic-Firmware-Friend-Finder-Edition/) also serves this file via the **Heltec T114** dropdown.
-
             See the [README](https://github.com/${{ github.repository }}/blob/main/README.md#heltec-t114-nrf52840--experimental) for full wiring and setup instructions.
-          files: flasher/firmware/heltec_t114/firmware.uf2
+          files: output/firmware.uf2
