@@ -29,14 +29,14 @@ RUN python3 -m venv /opt/pio-venv \
     && /opt/pio-venv/bin/pip install --upgrade pip \
     && /opt/pio-venv/bin/pip install platformio
 
-# Pre-install the nRF52 platform + ARM GCC toolchain by seeding from a
-# throwaway clone of upstream firmware. This bakes the ~500 MB download into
-# an image layer so per-run builds hit zero network.
+# Clone LeapYeet/firmware into /firmware-src and install the nRF52 platform
+# + ARM GCC toolchain. The clone is the default build source for CI
+# (one-shot: podman build && podman run). For local iteration, bind-mount
+# a host checkout over /firmware-src — the mount wins.
 RUN git clone --depth=1 --recurse-submodules --shallow-submodules \
-      https://github.com/LeapYeet/firmware.git /tmp/fw-seed \
-    && cd /tmp/fw-seed \
-    && pio pkg install --environment heltec-mesh-node-t114 \
-    && rm -rf /tmp/fw-seed
+      https://github.com/LeapYeet/firmware.git /firmware-src \
+    && cd /firmware-src \
+    && pio pkg install --environment heltec-mesh-node-t114
 
 COPY patch-t114.py /usr/local/bin/patch-t114.py
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
