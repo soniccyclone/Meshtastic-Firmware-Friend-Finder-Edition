@@ -21,11 +21,6 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout flasher repo
-        uses: actions/checkout@v4
-        with:
-          path: flasher
-
       - name: Checkout firmware source (LeapYeet/firmware)
         uses: actions/checkout@v4
         with:
@@ -75,22 +70,6 @@ jobs:
         working-directory: firmware-src
         run: pio run --environment heltec-mesh-node-t114
 
-      - name: Copy UF2 into flasher repo
-        run: |
-          cp firmware-src/.pio/build/heltec-mesh-node-t114/firmware.uf2 \
-             flasher/firmware/heltec_t114/firmware.uf2
-
-      - name: Commit UF2 to flasher repo
-        working-directory: flasher
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add firmware/heltec_t114/firmware.uf2
-          # Only commit if the binary actually changed
-          git diff --staged --quiet || \
-            git commit -m "chore: update T114 firmware binary [${{ inputs.version }}]"
-          git push
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -108,7 +87,5 @@ jobs:
             2. Drag and drop `firmware.uf2` onto that drive.
             3. The device flashes automatically and reboots into the new firmware.
 
-            The [web flasher](https://leapyeet.github.io/Meshtastic-Firmware-Friend-Finder-Edition/) also serves this file via the **Heltec T114** dropdown.
-
             See the [README](https://github.com/${{ github.repository }}/blob/main/README.md#heltec-t114-nrf52840--experimental) for full wiring and setup instructions.
-          files: flasher/firmware/heltec_t114/firmware.uf2
+          files: firmware-src/.pio/build/heltec-mesh-node-t114/firmware.uf2
