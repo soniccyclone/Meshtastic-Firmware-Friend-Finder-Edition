@@ -2,7 +2,7 @@
 """Apply build-environment workarounds to a pristine LeapYeet/firmware tree
 so it builds on Linux for the heltec-mesh-node-t114 target.
 
-Three independent issues this script works around:
+Four independent issues this script works around:
 
 1. SdFat (pulled transitively via Adafruit TinyUSB MSC) uses `SS` as a default
    parameter in SdFat.h:57, but the heltec_mesh_node_t114 variant does not
@@ -21,9 +21,15 @@ Three independent issues this script works around:
    (macOS, Windows) silently resolve this; Linux builds fail. Rewrite the
    include to match the filename.
 
+4. The Adafruit BluefruitLE nRF51 library (architectures=*) is pulled in
+   transitively even though nothing in src/ includes Adafruit_BLE.h, and it
+   redeclares err_t in a way that conflicts with the nRF52 Arduino core's
+   `typedef uint32_t err_t`. Add lib_ignore to the T114 environment so it
+   never enters the build.
+
 All workarounds can be retired when upstream variant.h / MagnetometerModule.h
-/ FriendFinderModule.cpp are fixed; remove the corresponding block and/or
-delete this script.
+/ FriendFinderModule.cpp / lib_deps are fixed; remove the corresponding block
+and/or delete this script.
 
 Run from the firmware source root.
 """
@@ -41,6 +47,11 @@ INJECTED_FLAGS = """-DHELTEC_T114
   -DI2C1_SDA_PIN=PIN_WIRE1_SDA
   -DI2C1_SCL_PIN=PIN_WIRE1_SCL""".format(marker=MARKER)
 
+ENV_HEADER = "[env:heltec-mesh-node-t114]"
+INJECTED_LIB_IGNORE = """{header}
+{marker} lib_ignore block
+lib_ignore = Adafruit BluefruitLE nRF51""".format(header=ENV_HEADER, marker=MARKER)
+
 
 def patch_variant_ini():
     try:
@@ -54,10 +65,13 @@ def patch_variant_ini():
         return
     if "-DHELTEC_T114" not in content:
         sys.exit(f"ERROR: expected '-DHELTEC_T114' anchor in {VARIANT_INI} not found")
+    if ENV_HEADER not in content:
+        sys.exit(f"ERROR: expected '{ENV_HEADER}' header in {VARIANT_INI} not found")
     content = content.replace("-DHELTEC_T114", INJECTED_FLAGS)
+    content = content.replace(ENV_HEADER, INJECTED_LIB_IGNORE, 1)
     with open(VARIANT_INI, "w") as f:
         f.write(content)
-    print(f"Patched {VARIANT_INI}: -DSS=0 + I2C{{0,1}}_{{SDA,SCL}}_PIN")
+    print(f"Patched {VARIANT_INI}: build_flags + lib_ignore")
 
 
 def patch_friend_finder_include():
