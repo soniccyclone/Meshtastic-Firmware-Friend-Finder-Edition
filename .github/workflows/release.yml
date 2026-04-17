@@ -1,28 +1,28 @@
-name: Build & Release T114 Firmware
+name: Release T114 Firmware
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Release tag (e.g. v2.7-FF-t114-1)"
-        required: true
-        default: "v2.7-FF-t114-1"
-      prerelease:
-        description: "Mark as pre-release"
-        type: boolean
-        default: true
+  push:
+    branches: [main]
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Compute CalVer tag
+        id: tag
+        run: echo "tag=v$(date -u +%Y.%m.%d)-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
       - name: Build ff-builder image
         run: docker build -f Containerfile -t ff-builder .
@@ -35,11 +35,12 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version }}
-          name: "Friend Finder ${{ inputs.version }}"
-          prerelease: ${{ inputs.prerelease }}
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Friend Finder ${{ steps.tag.outputs.tag }}"
+          prerelease: true
+          generate_release_notes: true
           body: |
-            ## Meshtastic Friend Finder ${{ inputs.version }}
+            ## Meshtastic Friend Finder ${{ steps.tag.outputs.tag }}
 
             ### Heltec T114 (nRF52840) — Experimental
 
