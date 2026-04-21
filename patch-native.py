@@ -3,7 +3,7 @@
 so it builds under the `native` (Portduino) PlatformIO environment on Linux
 for CI/integration tests of the FriendFinder module.
 
-Four independent issues this script works around:
+Five independent issues this script works around:
 
 1. variants/native/portduino/platformio.ini does not predefine
    `I2C0_SDA_PIN` / `I2C0_SCL_PIN` / `I2C1_SDA_PIN` / `I2C1_SCL_PIN`.
@@ -39,6 +39,15 @@ Four independent issues this script works around:
    definition outside the guard so the symbol the header declares
    `extern` always exists at link time.
 
+5. config.network.enabled_protocols defaults to 0 on a fresh Portduino
+   instance, which gates both UdpMulticastHandler.start() (main.cpp) and
+   Router's UDP broadcast path. Two simulated nodes compiled that way
+   cannot see each other over the mesh — broadcasts go nowhere and
+   receives never bind. Inject the blessed opt-in path:
+   USERPREFS_NETWORK_ENABLED_PROTOCOLS=1 makes installDefaultConfig()
+   seed the UDP_BROADCAST flag on first boot, so two fresh VFS dirs
+   auto-mesh over 224.0.0.69:4403 without any runtime config dance.
+
 Run from the firmware source root.
 """
 import sys
@@ -58,7 +67,8 @@ INI_INJECTED = """{anchor}
   -DI2C0_SDA_PIN=0
   -DI2C0_SCL_PIN=0
   -DI2C1_SDA_PIN=0
-  -DI2C1_SCL_PIN=0""".format(anchor=INI_ANCHOR, marker=INI_MARKER)
+  -DI2C1_SCL_PIN=0
+  -DUSERPREFS_NETWORK_ENABLED_PROTOCOLS=1""".format(anchor=INI_ANCHOR, marker=INI_MARKER)
 
 MAG_HEADER_INCLUDES_ANCHOR = """#include <Arduino.h>
 #include <Wire.h>

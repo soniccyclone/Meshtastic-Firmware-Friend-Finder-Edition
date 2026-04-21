@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN python3 -m venv /opt/pio-venv \
     && /opt/pio-venv/bin/pip install --upgrade pip \
-    && /opt/pio-venv/bin/pip install platformio
+    && /opt/pio-venv/bin/pip install platformio meshtastic
 
 # Clone LeapYeet/firmware into /firmware-src-baked and install the Portduino
 # platform + toolchain for env:native. This layer pins a firmware commit into
@@ -51,7 +51,13 @@ RUN git clone --depth=1 --recurse-submodules --shallow-submodules \
 
 COPY patch-native.py /usr/local/bin/patch-native.py
 COPY entrypoint-native.sh /usr/local/bin/entrypoint-native.sh
-RUN chmod +x /usr/local/bin/patch-native.py /usr/local/bin/entrypoint-native.sh
+COPY entrypoint-smoke.sh /usr/local/bin/entrypoint-smoke.sh
+COPY tests/smoke/two_node_smoke.py /usr/local/bin/two_node_smoke.py
+RUN chmod +x \
+      /usr/local/bin/patch-native.py \
+      /usr/local/bin/entrypoint-native.sh \
+      /usr/local/bin/entrypoint-smoke.sh \
+      /usr/local/bin/two_node_smoke.py
 
 WORKDIR /firmware-src-baked
 ENTRYPOINT ["/usr/local/bin/entrypoint-native.sh"]

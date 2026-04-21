@@ -19,6 +19,8 @@ on:
       - 'patch-native.py'
       - 'Dockerfile.native'
       - 'entrypoint-native.sh'
+      - 'entrypoint-smoke.sh'
+      - 'tests/smoke/**'
       - '.github/workflows/ci-native.yml'
   push:
     branches: [main]
@@ -26,6 +28,8 @@ on:
       - 'patch-native.py'
       - 'Dockerfile.native'
       - 'entrypoint-native.sh'
+      - 'entrypoint-smoke.sh'
+      - 'tests/smoke/**'
       - '.github/workflows/ci-native.yml'
   schedule:
     - cron: '0 6 * * 1'
@@ -65,10 +69,29 @@ jobs:
           mkdir -p output
           docker run --rm -v "$PWD/output:/output" ff-builder-native:ci
 
+      - name: Two-node SimRadio smoke test
+        run: |
+          mkdir -p smoke-output
+          docker run --rm \
+            -v "$PWD/smoke-output:/output" \
+            --entrypoint /usr/local/bin/entrypoint-smoke.sh \
+            ff-builder-native:ci
+
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-build-log
           path: output/build.log
+          if-no-files-found: warn
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-smoke-logs
+          path: |
+            smoke-output/smoke.log
+            smoke-output/node-a.log
+            smoke-output/node-b.log
           if-no-files-found: warn
