@@ -1,0 +1,57 @@
+# ff-builder-native — Meshtastic Friend Finder native/Portduino build environment.
+#
+# Bakes apt packages, PlatformIO, a shallow LeapYeet/firmware clone, and the
+# Portduino platform + toolchain into image layers so that iterative native
+# builds incur zero network I/O. Used for CI-style native/Portduino
+# compilation and integration tests of FriendFinder (no hardware required).
+#
+# The firmware source is expected to be bind-mounted at /firmware-src at run
+# time; the baked-in clone under /firmware-src-baked is the CI default.
+# Build output lives inside the container's .pio/build/native/ directory and
+# the build log is written to /output/build.log for inspection.
+#
+# Target arch: linux/amd64.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/opt/pio-venv/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git \
+      ca-certificates \
+      curl \
+      python3 \
+      python3-pip \
+      python3-venv \
+      python3-dev \
+      build-essential \
+      pkg-config \
+      libulfius-dev \
+      libssl-dev \
+      libyaml-cpp-dev \
+      libi2c-dev \
+      libbluetooth-dev \
+      libgpiod-dev \
+      libusb-1.0-0-dev \
+      libuv1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/pio-venv \
+    && /opt/pio-venv/bin/pip install --upgrade pip \
+    && /opt/pio-venv/bin/pip install platformio
+
+# Clone LeapYeet/firmware into /firmware-src-baked and install the Portduino
+# platform + toolchain for env:native. This layer pins a firmware commit into
+# the image; rebuild the image to refresh.
+RUN git clone --depth=1 --recurse-submodules --shallow-submodules \
+      https://github.com/LeapYeet/firmware.git /firmware-src-baked \
+    && cd /firmware-src-baked \
+    && pio pkg install --environment native
+
+COPY patch-native.py /usr/local/bin/patch-native.py
+COPY entrypoint-native.sh /usr/local/bin/entrypoint-native.sh
+RUN chmod +x /usr/local/bin/patch-native.py /usr/local/bin/entrypoint-native.sh
+
+WORKDIR /firmware-src-baked
+ENTRYPOINT ["/usr/local/bin/entrypoint-native.sh"]

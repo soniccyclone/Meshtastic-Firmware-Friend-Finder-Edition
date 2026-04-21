@@ -46,6 +46,7 @@ Once installed, here's how to get up and running:
 - [Advanced Features & Tools](#-advanced-features--tools)
 - [A Guide to Magnetometer Calibration](#-a-guide-to-magnetometer-calibration)
 - [Project Status & Future Goals](#-project-status--future-goals)
+- [Local Development — Native (Portduino) Build](#-local-development--native-portduino-build)
 - [Performance & Technical Notes](#-performance--technical-notes)
 - [License](#-license)
 
@@ -268,6 +269,39 @@ Please be aware that this entire project is a **work in progress**.
 -   **End Goal**: The ultimate goal is to refine this module and merge it with the official Meshtastic firmware repository so everyone can benefit from it.
 -   **Testing Needed**: Before an official merge is possible, extensive testing is required. Community feedback and testing are highly encouraged!
 -   **Community Support**: Special thanks to contributor **Nullvoid3771** for testing and confirming support for the LilyGo T-LoRa T3-S3 V1. The project owner is willing to investigate pin definitions and create new web flasher builds for other devices upon request. Please open an issue on GitHub to start the process.
+
+---
+
+## 🧪 Local Development — Native (Portduino) Build
+
+For iterating on FriendFinder logic without flashing real hardware, this fork ships a containerised Meshtastic native (Portduino) build. PlatformIO's `env:native` compiles the firmware as a Linux x86_64 binary and links against [SimRadio](https://github.com/meshtastic/firmware/tree/master/src/mesh/sim) (UDP loopback) so you can spin up multiple nodes that mesh with each other, all on one laptop. Useful for protocol/state-machine work and integration tests.
+
+[Dockerfile.native](Dockerfile.native) bakes the apt deps, PlatformIO, a shallow [LeapYeet/firmware](https://github.com/LeapYeet/firmware) clone, and the Portduino platform packages into image layers (~840 MB). After the one-time image build, iterative compiles take ~70 seconds with zero network I/O.
+
+```bash
+# Build the image once.
+podman build -f Dockerfile.native -t ff-builder-native .
+
+# Compile env:native against the firmware tree baked into the image.
+mkdir -p /tmp/ff-native-out
+podman run --rm -v /tmp/ff-native-out:/output:Z ff-builder-native
+# -> /tmp/ff-native-out/build.log (full pio output)
+
+# Iterate on a host firmware checkout — bind-mount it over /firmware-src.
+podman run --rm \
+  -v /path/to/your/LeapYeet-firmware:/firmware-src:Z \
+  -v /tmp/ff-native-out:/output:Z \
+  ff-builder-native
+
+# Drop into a shell to run the linked binary, debug, etc.
+podman run --rm -it --entrypoint bash ff-builder-native
+# Inside: cd /firmware-src-baked && python3 /usr/local/bin/patch-native.py
+#         pio run -e native && ./.pio/build/native/program
+```
+
+[patch-native.py](patch-native.py) applies four small workarounds to the upstream firmware tree so it compiles cleanly under Portduino: I2C pin macro definitions, a case-sensitive include fix in `FriendFinderModule.cpp`, and `#if !defined(ARCH_PORTDUINO)` guards around `MagnetometerModule` (replaced with a no-op stub class on native — the simulator has no magnetometer hardware to drive). The patcher is idempotent.
+
+**Limitations.** The native build is a logic harness, not a radio simulator. SimRadio uses UDP loopback so airtime, range, collision, and PHY-level behaviours are not modelled. Magnetometer-dependent UI paths fall through to their `magnetometerModule == nullptr` branches. Real hardware is still required for RF testing and to validate the actual UX on the target display.
 
 ---
 
