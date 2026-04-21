@@ -276,11 +276,11 @@ Please be aware that this entire project is a **work in progress**.
 
 For iterating on FriendFinder logic without flashing real hardware, this fork ships a containerised Meshtastic native (Portduino) build. PlatformIO's `env:native` compiles the firmware as a Linux x86_64 binary and links against [SimRadio](https://github.com/meshtastic/firmware/tree/master/src/mesh/sim) (UDP loopback) so you can spin up multiple nodes that mesh with each other, all on one laptop. Useful for protocol/state-machine work and integration tests.
 
-[Containerfile.native](Containerfile.native) bakes the apt deps, PlatformIO, a shallow [LeapYeet/firmware](https://github.com/LeapYeet/firmware) clone, and the Portduino platform packages into image layers (~840 MB). After the one-time image build, iterative compiles take ~70 seconds with zero network I/O.
+[Dockerfile.native](Dockerfile.native) bakes the apt deps, PlatformIO, a shallow [LeapYeet/firmware](https://github.com/LeapYeet/firmware) clone, and the Portduino platform packages into image layers (~840 MB). After the one-time image build, iterative compiles take ~70 seconds with zero network I/O.
 
 ```bash
 # Build the image once.
-podman build -f Containerfile.native -t ff-builder-native .
+podman build -f Dockerfile.native -t ff-builder-native .
 
 # Compile env:native against the firmware tree baked into the image.
 mkdir -p /tmp/ff-native-out

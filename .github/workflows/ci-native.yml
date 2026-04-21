@@ -1,11 +1,11 @@
 name: Native CI
 
 # Build the Meshtastic `native` (Portduino) PlatformIO environment with the
-# FriendFinder patches applied. Uses the same Containerfile the local dev
-# loop uses, so CI and local reproduce each other bit-for-bit.
+# FriendFinder patches applied. Uses the same Dockerfile the local dev loop
+# uses, so CI and local reproduce each other bit-for-bit.
 #
 # What triggers a run:
-#   - PRs touching the patcher, the native Containerfile/entrypoint, or this
+#   - PRs touching the patcher, the native Dockerfile/entrypoint, or this
 #     workflow itself. Upstream firmware changes outside this repo do not
 #     trigger runs — the scheduled job below catches that drift.
 #   - Pushes to main touching the same paths (post-merge verification).
@@ -17,14 +17,14 @@ on:
   pull_request:
     paths:
       - 'patch-native.py'
-      - 'Containerfile.native'
+      - 'Dockerfile.native'
       - 'entrypoint-native.sh'
       - '.github/workflows/ci-native.yml'
   push:
     branches: [main]
     paths:
       - 'patch-native.py'
-      - 'Containerfile.native'
+      - 'Dockerfile.native'
       - 'entrypoint-native.sh'
       - '.github/workflows/ci-native.yml'
   schedule:
@@ -54,7 +54,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Containerfile.native
+          file: Dockerfile.native
           load: true
           tags: ff-builder-native:ci
           cache-from: type=gha
