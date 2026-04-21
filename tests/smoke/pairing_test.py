@@ -88,8 +88,14 @@ def main() -> int:
             ("A", a_dir, NODE_A_PORT, log_a_fh),
             ("B", b_dir, NODE_B_PORT, log_b_fh),
         ]:
+            # stdbuf -oL forces line-buffering on the program's stdout. Without
+            # it, the C-stdio buffer holds lines like "Pairing complete!" until
+            # the 4k threshold is hit (sometimes tens of seconds) — and we've
+            # seen CI runs where the buffer only flushed at SIGTERM, which is
+            # after the test already timed out. Line-buffering makes the tail
+            # reliable.
             p = subprocess.Popen(
-                [str(program), "-s", "-d", str(fsdir), "-p", str(port)],
+                ["stdbuf", "-oL", str(program), "-s", "-d", str(fsdir), "-p", str(port)],
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 preexec_fn=os.setsid,
