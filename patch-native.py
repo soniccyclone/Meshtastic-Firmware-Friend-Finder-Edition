@@ -3,7 +3,7 @@
 so it builds under the `native` (Portduino) PlatformIO environment on Linux
 for CI/integration tests of the FriendFinder module.
 
-Five independent issues this script works around:
+Six independent issues this script works around:
 
 1. variants/native/portduino/platformio.ini does not predefine
    `I2C0_SDA_PIN` / `I2C0_SCL_PIN` / `I2C1_SDA_PIN` / `I2C1_SCL_PIN`.
@@ -48,6 +48,22 @@ Five independent issues this script works around:
    seed the UDP_BROADCAST flag on first boot, so two fresh VFS dirs
    auto-mesh over 224.0.0.69:4403 without any runtime config dance.
 
+6. The pairing state machine in FriendFinderModule is driven by user UI
+   taps — a button press invokes beginPairing() and an "Accept?" banner
+   waits for user confirmation before acceptPairingRequest() runs. A
+   native integration test has no UI, so nothing ever enters pairing
+   mode and nothing ever confirms an incoming REQUEST. Gate two tiny
+   bootstrap hooks behind FF_NATIVE_AUTO_PAIR=1: call beginPairing()
+   once from runOnce() on the first tick after startup (MeshModule's
+   setup() isn't actually invoked by the framework for this module in
+   the LeapYeet fork, so runOnce is the first reliable callback after
+   the router + multicast stack are up), and have
+   showConfirmationPrompt() short-circuit into acceptPairingRequest().
+   Both sim nodes start broadcasting REQUESTs immediately on boot,
+   auto-accept each other on first mutual reception, and complete the
+   full pairing handshake without any external driver — giving CI a
+   fully in-firmware check of the REQUEST -> ACCEPT state transitions.
+
 Run from the firmware source root.
 """
 import sys
@@ -60,6 +76,7 @@ MAG_CPP = "src/modules/MagnetometerModule.cpp"
 INI_MARKER = "# ff-builder native patches"
 MAG_HEADER_MARKER = "// ff-builder native magnetometer guards"
 MAG_CPP_MARKER = "// ff-builder native magnetometer guard"
+FF_AUTO_PAIR_MARKER = "// ff-builder native auto-pair patch"
 
 INI_ANCHOR = "-I variants/native/portduino"
 INI_INJECTED = """{anchor}
@@ -68,7 +85,8 @@ INI_INJECTED = """{anchor}
   -DI2C0_SCL_PIN=0
   -DI2C1_SDA_PIN=0
   -DI2C1_SCL_PIN=0
-  -DUSERPREFS_NETWORK_ENABLED_PROTOCOLS=1""".format(anchor=INI_ANCHOR, marker=INI_MARKER)
+  -DUSERPREFS_NETWORK_ENABLED_PROTOCOLS=1
+  -DFF_NATIVE_AUTO_PAIR=1""".format(anchor=INI_ANCHOR, marker=INI_MARKER)
 
 MAG_HEADER_INCLUDES_ANCHOR = """#include <Arduino.h>
 #include <Wire.h>
@@ -233,8 +251,108 @@ def patch_magnetometer_cpp():
     print(f"Patched {MAG_CPP}: ARCH_PORTDUINO guard around full file")
 
 
+FF_RUNONCE_ANCHOR = """int32_t FriendFinderModule::runOnce()
+{
+    const uint32_t now = millis();
+
+    if (currentState == FriendFinderState::PAIRING_DISCOVERY) {"""
+
+FF_RUNONCE_REPLACEMENT = (
+    "int32_t FriendFinderModule::runOnce()\n"
+    "{\n"
+    "    const uint32_t now = millis();\n"
+    "\n"
+    "    " + FF_AUTO_PAIR_MARKER + ": one-shot bootstrap so the sim boots directly into\n"
+    "    // PAIRING_DISCOVERY. MeshModule::setup() is never actually invoked by\n"
+    "    // the framework for FriendFinder in this fork, so runOnce() is the\n"
+    "    // first reliable callback after the router/multicast stack is up.\n"
+    "#if defined(FF_NATIVE_AUTO_PAIR)\n"
+    "    static bool _ff_auto_pair_bootstrapped = false;\n"
+    "    if (!_ff_auto_pair_bootstrapped) {\n"
+    "        _ff_auto_pair_bootstrapped = true;\n"
+    '        LOG_INFO("[FriendFinder] FF_NATIVE_AUTO_PAIR: entering pairing discovery");\n'
+    "        beginPairing();\n"
+    "    }\n"
+    "#endif\n"
+    "\n"
+    "    if (currentState == FriendFinderState::PAIRING_DISCOVERY) {"
+)
+
+
+FF_CONFIRM_ANCHOR = """    currentState = FriendFinderState::AWAITING_CONFIRMATION;
+
+    char msg[64];"""
+
+FF_CONFIRM_REPLACEMENT = (
+    "    currentState = FriendFinderState::AWAITING_CONFIRMATION;\n"
+    "\n"
+    "    " + FF_AUTO_PAIR_MARKER + ": skip UI confirmation on the sim, auto-accept immediately so\n"
+    "    // the pairing handshake progresses without a button tap.\n"
+    "#if defined(FF_NATIVE_AUTO_PAIR)\n"
+    '    LOG_INFO("[FriendFinder] FF_NATIVE_AUTO_PAIR: skipping UI confirmation, auto-accepting");\n'
+    "    acceptPairingRequest();\n"
+    "    return;\n"
+    "#endif\n"
+    "\n"
+    "    char msg[64];"
+)
+
+
+FF_COMPLETE_ANCHOR = """    snprintf(msg, sizeof(msg), "%s Paired!", getShortName(nodeNum));
+    screen->showSimpleBanner(msg, 2500);
+
+    raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+
+    graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_base_menu;
+    screen->runNow();"""
+
+FF_COMPLETE_REPLACEMENT = (
+    '    snprintf(msg, sizeof(msg), "%s Paired!", getShortName(nodeNum));\n'
+    "    " + FF_AUTO_PAIR_MARKER + ": completePairing uses screen-> unconditionally. On\n"
+    "    // headless Portduino env:native the Screen object is never constructed and the\n"
+    "    // global `screen` stays null, so any method call segfaults. A compile-time\n"
+    "    // `#if HAS_SCREEN` gate is unreliable here because Screen.h drags HAS_SCREEN\n"
+    "    // defined through an indirect include chain — use a runtime null check.\n"
+    "    if (screen) {\n"
+    "        screen->showSimpleBanner(msg, 2500);\n"
+    "    }\n"
+    "\n"
+    "    raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);\n"
+    "\n"
+    "    if (screen) {\n"
+    "        graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_base_menu;\n"
+    "        screen->runNow();\n"
+    "    }"
+)
+
+
+def patch_friend_finder_auto_pair():
+    try:
+        with open(FRIEND_FINDER_CPP) as f:
+            content = f.read()
+    except FileNotFoundError:
+        sys.exit(f"ERROR: {FRIEND_FINDER_CPP} not found. Run from firmware source root.")
+
+    if FF_AUTO_PAIR_MARKER in content:
+        print(f"Skipped {FRIEND_FINDER_CPP} auto-pair: already patched")
+        return
+    if FF_RUNONCE_ANCHOR not in content:
+        sys.exit(f"ERROR: runOnce() head anchor in {FRIEND_FINDER_CPP} not found")
+    if FF_CONFIRM_ANCHOR not in content:
+        sys.exit(f"ERROR: AWAITING_CONFIRMATION anchor in {FRIEND_FINDER_CPP} not found")
+    if FF_COMPLETE_ANCHOR not in content:
+        sys.exit(f"ERROR: completePairing screen block anchor in {FRIEND_FINDER_CPP} not found")
+    content = content.replace(FF_RUNONCE_ANCHOR, FF_RUNONCE_REPLACEMENT, 1)
+    content = content.replace(FF_CONFIRM_ANCHOR, FF_CONFIRM_REPLACEMENT, 1)
+    content = content.replace(FF_COMPLETE_ANCHOR, FF_COMPLETE_REPLACEMENT, 1)
+    with open(FRIEND_FINDER_CPP, "w") as f:
+        f.write(content)
+    print(f"Patched {FRIEND_FINDER_CPP}: FF_NATIVE_AUTO_PAIR bootstrap + auto-accept + headless completePairing guards")
+
+
 if __name__ == "__main__":
     patch_native_ini()
     patch_friend_finder_include()
     patch_magnetometer_header()
     patch_magnetometer_cpp()
+    patch_friend_finder_auto_pair()

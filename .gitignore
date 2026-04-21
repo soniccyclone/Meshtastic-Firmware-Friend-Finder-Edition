@@ -6,3 +6,6 @@
 
 # ff-builder build output — distributed as a GitHub release asset, not checked in.
 firmware/heltec_t114/firmware.uf2
+
+# Claude Code ephemeral runtime state.
+.claude/scheduled_tasks.lock

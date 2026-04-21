@@ -53,11 +53,13 @@ COPY patch-native.py /usr/local/bin/patch-native.py
 COPY entrypoint-native.sh /usr/local/bin/entrypoint-native.sh
 COPY entrypoint-smoke.sh /usr/local/bin/entrypoint-smoke.sh
 COPY tests/smoke/two_node_smoke.py /usr/local/bin/two_node_smoke.py
+COPY tests/smoke/pairing_test.py /usr/local/bin/pairing_test.py
 RUN chmod +x \
       /usr/local/bin/patch-native.py \
       /usr/local/bin/entrypoint-native.sh \
       /usr/local/bin/entrypoint-smoke.sh \
-      /usr/local/bin/two_node_smoke.py
+      /usr/local/bin/two_node_smoke.py \
+      /usr/local/bin/pairing_test.py
 
 WORKDIR /firmware-src-baked
 ENTRYPOINT ["/usr/local/bin/entrypoint-native.sh"]
