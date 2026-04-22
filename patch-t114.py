@@ -30,19 +30,23 @@ Six independent issues this script works around:
 5. FriendFinderModule.cpp calls `service->reloadConfig(SEGMENT_CONFIG)` on
    every tracking-session start and stop to propagate the temporary high-
    power GPS interval. reloadConfig persists the entire LocalConfig proto
-   to /prefs/config.proto on LittleFS. Combined with the unrecovered I2C
-   hangs on Wire1 (see #6), two writes-per-session amplifies the upstream
-   LFS filesystem-corruption bug (meshtastic/firmware#5839), bricking T114s
-   during normal Friend Finder use. Replace reloadConfig with a runtime-only
-   observer notify so the GPS subsystem still picks up the change without
-   flashing the proto.
+   to /prefs/config.proto on LittleFS — two atomic writes per session.
+   These writes are fullAtomic=true and so cannot themselves corrupt LFS,
+   but they are unnecessary flash-page cycles for what is a runtime-only
+   concern. Replace reloadConfig with a runtime-only observer notify so
+   the GPS subsystem still picks up the change without touching flash.
+   Defense-in-depth, not the brick fix — see docs/design/t114-brick-fix.md
+   for the actual root cause.
 
 6. MagnetometerModule.cpp::qmcReadRaw performs bus transactions on Wire1
-   with no timeout and no bus recovery. When the QMC5883L holds SDA low
-   after an EMI glitch or missed STOP, the thread stalls long enough to
-   coincide with a LittleFS write from elsewhere, corrupting /prefs. Inject
-   a canonical SCL-clock-pulse bus-recovery routine and invoke it on N
-   consecutive read failures.
+   with no timeout and no bus recovery. A QMC5883L holding SDA low after
+   an EMI glitch or missed STOP is a structurally-plausible failure mode
+   on nRF52 — the driver provides no escape. Inject a canonical SCL-clock-
+   pulse bus-recovery routine and invoke it on N consecutive read failures.
+   This path has not been observed organically in any log we have (see
+   docs/design/t114-brick-fix.md H2), so the patch is defensive rather than
+   responsive to confirmed failures — cheap to carry, instrumented so the
+   field will tell us if the path ever does fire.
 
 All workarounds can be retired when upstream variant.h / MagnetometerModule.*
 / FriendFinderModule.cpp / lib_deps are fixed; remove the corresponding block
@@ -152,10 +156,11 @@ MAG_QMC_READ_RAW_ORIGINAL = """bool MagnetometerModule::qmcReadRaw(TwoWire &bus,
     return true;
 }"""
 
-MAG_QMC_READ_RAW_REPLACEMENT = """// """ + """ff-builder: I2C bus recovery on nRF52 Wire1 hangs.
+MAG_QMC_READ_RAW_REPLACEMENT = """// """ + """ff-builder: I2C bus recovery on nRF52 Wire1 hangs (defensive).
 // After N consecutive NAKs, detach the peripheral, clock SCL 9x to flush
-// any slave holding SDA mid-ACK, issue a STOP, and re-attach. Unrecovered
-// stalls here coincide with LittleFS writes and corrupt /prefs.
+// any slave holding SDA mid-ACK, issue a STOP, and re-attach. The stall
+// path exists structurally (no timeout, no recovery in the upstream
+// driver) but has not been observed organically in field logs so far.
 static void ff_qmcBusRecovery(TwoWire &bus, int sdaPin, int sclPin) {
     bus.end();
     pinMode(sclPin, OUTPUT);
