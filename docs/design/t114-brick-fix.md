@@ -19,7 +19,7 @@ Audited the LeapYeet/firmware source directly. Several hypotheses were tested an
 
 **H1 — "FriendFinderModule writes persistent state during tracking → LFS churn → corruption."** Partially true but insufficient. `FriendFinderModule::activateHighGpsMode()` and `restoreNormalGpsMode()` call `service->reloadConfig(SEGMENT_CONFIG)`, which persists `LocalConfig` to `/prefs/config.proto` — two writes per tracking session. However, [NodeDB.h:239](https://github.com/LeapYeet/firmware) declares `saveProto` with `fullAtomic = true` by default, so those writes are atomic (temp-file-plus-rename) and cannot corrupt LFS even if interrupted. Cutting this write rate is defense-in-depth, not the fix.
 
-**H2 — "MagnetometerModule::qmcReadRaw stalls Wire1 → watchdog resets mid-flash-write."** Plausible and partially validated. TezlaKid's COM11 serial log shows `[Magnetometer] QMC read failed; will retry.` at uptime 1208s — a real I2C transaction failure. The upstream driver has no timeout and no bus-recovery, so a slave holding SDA low after an EMI glitch is a real risk. Adding SCL-clock-pulse recovery is correct defensive code but does not, by itself, explain the observed brick pattern.
+**H2 — "MagnetometerModule::qmcReadRaw stalls Wire1 → watchdog resets mid-flash-write."** Plausible but unobserved. The upstream driver has no timeout and no bus-recovery, so a slave holding SDA low after an EMI glitch is a real structural risk. An earlier pass of this doc cited a `[Magnetometer] QMC read failed; will retry.` line from TezlaKid's COM11 log at uptime 1208s as positive evidence, but that event was later identified as user-induced (the device was physically unplugged during capture). No organic instance has been observed in the logs we have. Adding SCL-clock-pulse recovery is still correct defensive code — the path exists — but H2 is not on positive footing, and does not explain the observed brick pattern.
 
 **H3 — "Persistence on nRF52 is different from ESP32, and the Friend Finder code doesn't know."** Confirmed but unrelated to the brick. Both `MagnetometerModule` and `FriendFinderModule` guard their `Preferences`-based persistence behind `#if defined(ARDUINO_ARCH_ESP32)`, so on the T114 none of the in-module `save*()` functions write anything. Friends, places, and calibration are RAM-only on nRF52 — a separate UX bug, not this one.
 
@@ -43,13 +43,15 @@ The mesh triggers `saveToDisk(SEGMENT_NODEDATABASE)` on every new-node discovery
 
 ## Root Cause
 
-Two failure modes compound, both of which produce the same symptom:
+Primary mechanism:
 
-1. **Voltage sag during SX1262 TX coincides with a `nodes.proto` write.** On battery, a TX burst draws >100mA peak. The regulator cannot hold 3.3V through the dip on a less-than-fresh cell. The nRF52840 BOD fires during the ~17KB non-atomic write. LFS commits a torn block. Boot-time mount fails.
+**Voltage sag during SX1262 TX coincides with a `nodes.proto` write.** On battery, a TX burst draws >100mA peak. The regulator cannot hold 3.3V through the dip on a less-than-fresh cell. The nRF52840 BOD fires during the ~17KB non-atomic write. LFS commits a torn block. Boot-time mount fails.
 
-2. **(Less common) Wire1 TWIM peripheral stalls on a QMC5883L NAK, thread hangs, Meshtastic's watchdog resets the device.** If the reset lands mid-`nodes.proto` write, same outcome.
+Structurally-plausible secondary mechanism (unobserved but not ruled out):
 
-The common thread is the non-atomic write to `/prefs/nodes.proto` as the fragile surface, plus a trigger (BOD or WDT) that can reset the MCU while that write is in flight. Every known repro from issue #12 overlaps one of these windows.
+**Wire1 TWIM peripheral stalls on a QMC5883L NAK, thread hangs, Meshtastic's watchdog resets the device.** If the reset landed mid-`nodes.proto` write, the outcome would be the same as the primary mechanism. This path exists because the upstream magnetometer driver has no I2C timeout and no bus-recovery, but no organic instance appears in the logs collected so far.
+
+The common thread across both mechanisms is the non-atomic write to `/prefs/nodes.proto` as the fragile surface, plus a trigger (BOD or — hypothetically — WDT) that can reset the MCU while that write is in flight. The observed brick pattern aligns with the primary (power-sag) mechanism; remediation should close that window first, with defense-in-depth for the secondary.
 
 ## Why PR #15 Is Insufficient
 
@@ -57,7 +59,7 @@ The existing PR ships two patch blocks in `patch-t114.py`:
 
 - **Patch A** replaces `service->reloadConfig(SEGMENT_CONFIG)` with `service->configChanged.notifyObservers(nullptr)` in `FriendFinderModule`. Correctly eliminates two atomic writes per tracking session. These writes were not the corruption surface, so this does not close the brick path. It reduces radio-thread-plus-flash overlap density slightly. Keep as defense-in-depth.
 
-- **Patch B** wraps `MagnetometerModule::qmcReadRaw` with a counter-based SCL-clock-pulse bus-recovery helper after three consecutive NAKs. Addresses the H2 failure path, which TezlaKid's COM11 log confirmed is real. Keep as defense-in-depth.
+- **Patch B** wraps `MagnetometerModule::qmcReadRaw` with a counter-based SCL-clock-pulse bus-recovery helper after three consecutive NAKs. Addresses the H2 failure path. H2 is plausible (the upstream driver has no timeout or bus-recovery) but has not been observed organically in any log we have; the patch is defensive rather than responsive to confirmed failures. Keep as defense-in-depth — cheap to carry, and if the path ever does fire in the field the logging will catch it.
 
 Neither patch touches `/prefs/nodes.proto` or the `saveProto(..., fullAtomic=false)` call path. Neither addresses the power-sag trigger. PR #15 alone cannot fix issue #12.
 
