@@ -1,0 +1,92 @@
+name: PR Build T114 Firmware (RC)
+
+# Build a flashable T114 UF2 on every PR that touches the T114 build surface
+# and publish it as a GitHub pre-release tagged per-PR. QA flashes the
+# attached firmware.uf2 straight from the release page — no local toolchain
+# required.
+#
+# Triggers on PR events touching paths that affect the T114 build:
+#   - patch-t114.py   : the patcher whose output lands in the UF2
+#   - Dockerfile      : defines the ff-builder image
+#   - build.sh        : local podman wrapper (kept in sync with CI semantics)
+#   - entrypoint.sh   : what runs inside the container to compile
+#   - this workflow   : so CI validates changes to itself
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'patch-t114.py'
+      - 'Dockerfile'
+      - 'build.sh'
+      - 'entrypoint.sh'
+      - '.github/workflows/pr-build-t114.yml'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: pr-build-t114-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  rc-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute RC tag
+        id: tag
+        run: |
+          TAG="v$(date -u +%Y.%m.%d)-pr${{ github.event.pull_request.number }}.${{ github.run_number }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "name=Friend Finder RC $TAG (PR #${{ github.event.pull_request.number }})" >> "$GITHUB_OUTPUT"
+
+      - name: Build ff-builder image
+        run: docker build -t ff-builder .
+
+      - name: Compile T114 firmware
+        run: |
+          mkdir -p output
+          docker run --rm -v "$PWD/output:/output" ff-builder
+
+      - name: Create GitHub pre-release
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.name }}
+          prerelease: true
+          target_commitish: ${{ github.event.pull_request.head.sha }}
+          body: |
+            Automatic release candidate for [PR #${{ github.event.pull_request.number }}](${{ github.event.pull_request.html_url }}).
+
+            **Flash the attached `firmware.uf2` to a T114:**
+            1. Double-press reset on the T114 — a USB drive (`T114_BOOT`) appears.
+            2. Drag `firmware.uf2` onto that drive.
+            3. The device flashes and reboots into the PR's patched firmware.
+
+            Built from commit ${{ github.event.pull_request.head.sha }}. This tag will remain after the PR merges or closes; it is not auto-cleaned.
+          files: output/firmware.uf2
+
+      - name: Comment on PR with RC link
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ steps.tag.outputs.tag }}';
+            const releaseUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`;
+            const body = [
+              `**RC build available:** [\`${tag}\`](${releaseUrl})`,
+              ``,
+              `Download \`firmware.uf2\` from the release page above and flash to a T114 (double-press reset, drop onto \`T114_BOOT\` drive).`,
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
