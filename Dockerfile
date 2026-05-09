@@ -33,9 +33,15 @@ RUN python3 -m venv /opt/pio-venv \
 # + ARM GCC toolchain. The clone is the default build source for CI
 # (one-shot: podman build && podman run). For local iteration, bind-mount
 # a host checkout over /firmware-src — the mount wins.
-RUN git clone --depth=1 --recurse-submodules --shallow-submodules \
-      https://github.com/LeapYeet/firmware.git /firmware-src \
+#
+# Pin: f49f9b796731 was the upstream master tip on 2026-04-17 when the known-
+# good v0.0.1 firmware was built. Floating HEAD is non-reproducible — bump
+# this SHA deliberately when you want to absorb upstream changes.
+ARG LEAPYEET_FIRMWARE_SHA=f49f9b7967311a08c7bf1c1af6e8f28671182cd1
+RUN git clone --recurse-submodules https://github.com/LeapYeet/firmware.git /firmware-src \
     && cd /firmware-src \
+    && git checkout "${LEAPYEET_FIRMWARE_SHA}" \
+    && git submodule update --init --recursive \
     && pio pkg install --environment heltec-mesh-node-t114
 
 COPY patch-t114.py /usr/local/bin/patch-t114.py
