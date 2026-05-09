@@ -16,6 +16,8 @@ on:
       - 'firmware-examples/**'
       - '.claude/**'
       - '.beads/**'
+      - '.github/**'
+      - '.gitignore'
       - 'LICENSE'
 
 permissions:
