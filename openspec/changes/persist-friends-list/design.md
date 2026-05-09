@@ -103,6 +103,21 @@ This goes through `NodeDB::saveProto` / `NodeDB::loadProto` by passing a degener
 
 The whole file is ~200 bytes. LittleFS easily holds two copies. There is no reason to use the non-atomic write path that caused the brick. Atomic-only is also the cleanest composition with P0/P1 (D5).
 
+**Caveat surfaced during implementation**: `SafeFile` only implements true temp-file-plus-rename atomicity on non-nRF52 platforms. From [SafeFile.cpp:10-13](../../../../code-stuff/LeapYeet-firmware/src/SafeFile.cpp#L10-L13):
+
+```cpp
+#ifdef ARCH_NRF52
+    FSCom.remove(filename);
+    return FSCom.open(filename, FILE_O_WRITE);
+#endif
+```
+
+On nRF52 the live file is removed and rewritten in place, with no temp/rename step. The `close()` body has the same nRF52 short-circuit (returns `true` without the readback verification). This is a known limitation of the platform abstraction, not something this change can fix without reshaping `SafeFile` itself.
+
+Practical implication: on T114, "atomic" friends writes are best-effort. The in-flight write window is brief — the file is ~200 bytes, one or two flash-page operations — but a reset during that window can truncate the live file. Loss of all friends in that case is bounded and recoverable by re-pairing — strictly better than today's RAM-only baseline (lose friends every reboot), and the brick-fix P0 gate is the proper long-term fix because it closes the reset-during-write window itself rather than relying on filesystem-level atomicity.
+
+The spec's "Persistence writes are crash-safe" requirement is therefore satisfied on platforms where `SafeFile` provides real atomicity (ESP32) and best-effort on nRF52. We pass `fullAtomic=true` regardless because (a) it's correct on platforms that honor it, and (b) the nRF52 branch ignores the parameter rather than misbehaving on it.
+
 ### D3 — Event-driven writes, not periodic
 
 Write only on mutation — `upsertFriend` (already calls `saveFriends()` at cpp:289), `removeFriendByListIndex` (already calls `saveFriends()` at cpp:160). No polling timer, no shadow-state diffing. Rationale:

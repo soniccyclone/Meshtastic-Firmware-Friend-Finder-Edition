@@ -28,19 +28,25 @@ The system SHALL persist removals from the friends list immediately, such that a
 - **WHEN** a user removes a paired friend through the device UI (`removeFriendByListIndex` or equivalent), then power-cycles the device
 - **THEN** the removed friend SHALL NOT appear in the friends list on boot
 
-### Requirement: Persistence writes are crash-safe
+### Requirement: Persistence writes are crash-safe (best-effort on nRF52)
 
-The system SHALL write the friends-list persistence file atomically (write-temp-then-rename), such that an interrupted write — including BOD reset, watchdog reset, or power loss mid-write — does not corrupt the previously-written friends list.
+The system SHALL write the friends-list persistence file via `SafeFile` with `fullAtomic = true`. On platforms where `SafeFile` honors the flag (ESP32 family), the underlying write SHALL use temp-file-plus-rename so that an interrupted write does not corrupt the previously-written friends list. On nRF52 (T114), `SafeFile` collapses to in-place write (per [SafeFile.cpp:10-13](../../../../code-stuff/LeapYeet-firmware/src/SafeFile.cpp#L10-L13)); on this platform the crash-safety guarantee is best-effort, bounded by the small file size (~200 bytes worst case = one or two flash-page operations). The brick-fix P0 gate, when it lands, will close the underlying reset-during-write window for nRF52.
 
-#### Scenario: Interrupted write does not corrupt prior state
+#### Scenario: Interrupted write does not corrupt prior state (ESP32)
 
-- **WHEN** a write to the friends-list persistence file is interrupted before completion (e.g., by a forced reset)
+- **WHEN** a write to the friends-list persistence file is interrupted before completion on an ESP32 build
 - **THEN** the prior, last-successfully-written friends list SHALL still load correctly on the next boot, and at most the single in-flight change SHALL be lost
+
+#### Scenario: Interrupted write may truncate the live file (nRF52)
+
+- **WHEN** a write to the friends-list persistence file is interrupted before completion on an nRF52/T114 build
+- **THEN** the live file MAY be left truncated (because `SafeFile` writes in place on this platform); on next boot the firmware SHALL detect the truncation via the magic / version / count header checks and boot with an empty friends list rather than crashing or refusing to mount the filesystem
+- **AND** the firmware SHALL log a single WARN-level line indicating the file failed validation, so the user is informed why the friends list reset
 
 #### Scenario: Persistence file is opened with full-atomic semantics
 
 - **WHEN** the persistence layer writes the friends file
-- **THEN** it SHALL invoke `NodeDB::saveProto` with `fullAtomic = true` (the platform's temp-file-plus-rename path), so that an interrupted write truncates the temp file rather than the live file
+- **THEN** it SHALL invoke `SafeFile(filename, /*fullAtomic=*/true)` (the platform's atomic-or-best-effort path), so that on platforms that honor the flag the write completes via temp-file-plus-rename
 
 ### Requirement: Persistence writes compose with the T114 write-policy gate
 
