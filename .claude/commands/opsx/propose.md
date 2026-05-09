@@ -43,7 +43,23 @@ When ready to implement, run /opsx:apply
    - `applyRequires`: array of artifact IDs needed before implementation (e.g., `["tasks"]`)
    - `artifacts`: list of all artifacts with their status and dependencies
 
-4. **Create artifacts in sequence until apply-ready**
+4. **Ground the proposal in real source code (MANDATORY before writing any artifact)**
+
+   Before generating proposal.md, design.md, or specs, identify every external code surface the change will touch and **read it**. Specs that name struct fields, function signatures, file paths, or API symbols sourced from imagination produce normative requirements that turn out to be wrong at apply-time.
+
+   a. **Resolve cross-repo source.** If the change touches code in another repository (an upstream firmware tree cloned by a Makefile, a vendored submodule, a sibling package, etc.), check whether that source is present locally. If not, clone it now using the canonical command from the project's Makefile / setup script — do not invent paths or URLs.
+
+   b. **Read the actual code.** Open the structs, functions, files, and APIs the change will modify. Capture verbatim:
+      - Struct/class definitions with all fields and types
+      - Function signatures and default-parameter values
+      - File paths and conditional-compilation guards
+      - Any platform-specific gating that affects the change
+
+   c. **Verification rule.** Every named struct field, function, file path, or API symbol that appears in proposal.md, design.md, or specs MUST trace back to a `grep`-verifiable line in real code. If a name truly cannot be verified before writing, mark it explicitly as `<TBD>` rather than asserting an invented name. Open Questions in design.md are NOT a substitute for verification — they are for genuine design decisions, not for "I didn't read the code yet."
+
+   d. **Skip clause.** If the change is purely a docs/process/config tweak that touches no code surface, this step is a no-op — note that and continue.
+
+5. **Create artifacts in sequence until apply-ready**
 
    Use the **TodoWrite tool** to track progress through the artifacts.
 
@@ -75,7 +91,7 @@ When ready to implement, run /opsx:apply
       - Use **AskUserQuestion tool** to clarify
       - Then continue with creation
 
-5. **Show final status**
+6. **Show final status**
    ```bash
    openspec status --change "<name>"
    ```

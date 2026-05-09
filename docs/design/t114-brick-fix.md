@@ -163,7 +163,7 @@ Revisit after P0+P1+P2+P3 have been in the field long enough to confirm the writ
 
 - **Upstream `meshtastic/firmware#5839` fix.** That's a Meshtastic-wide concern, not Friend Finder. P0 makes us resilient to it regardless of whether upstream lands a fix.
 - **Hardware-side mitigations** (larger bulk cap on Vbat, higher-quality cell). Real fixes, but not ours to ship in firmware patches.
-- **Persisting Friend Finder state on nRF52** (friends, places, calibration). Genuine UX bug — currently all RAM-only on T114 — but orthogonal to the brick. Separate issue.
+- **Persisting Friend Finder state on nRF52** (friends, places, calibration). Genuine UX bug — currently all RAM-only on T114 — but orthogonal to the brick. Friends-list persistence is being addressed in OpenSpec change [`persist-friends-list`](../../openspec/changes/persist-friends-list/) (issue [#25](https://github.com/soniccyclone/Meshtastic-Firmware-Friend-Finder-Edition/issues/25)); places and calibration remain separate follow-ups.
 
 ## Validation
 
