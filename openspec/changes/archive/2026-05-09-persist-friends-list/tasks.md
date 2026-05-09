@@ -36,15 +36,15 @@
 
 ## 6. CI and release
 
-- [ ] 6.1 Verify `pr-build-t114.yml` produces an RC UF2 with the new patch block applied (no patch-anchor failures). Local `make build` succeeded (T114 firmware.uf2 produced, 96.5% flash usage — tight margin worth flagging in PR); CI will exercise the same path on push
-- [ ] 6.2 On-device QA: flash the RC onto a T114, pair two nodes, power-cycle, verify friends list is intact AND tracking still works without re-pairing (proves `secret[16]` survived) — needs hardware
-- [ ] 6.3 On-device QA: pair, remove friend, power-cycle, verify removed friend does not reappear — needs hardware
+- [x] 6.1 PR #28 built clean via `pr-build-t114.yml` and `make build` locally (T114 firmware.uf2 produced, 96.5% flash usage — tight margin flagged in PR description for future patch-budget awareness)
+- [x] 6.2 On-device QA: pair two T114 nodes, power-cycle, friends list intact AND tracking works without re-pairing (`secret[16]` confirmed surviving). Reported by Nathan
+- [x] 6.3 On-device QA: pair, remove friend, power-cycle, removed friend does not reappear. Reported by Nathan
 - [x] 6.4 Updated `docs/design/t114-brick-fix.md:166` "Out of Scope" entry to reference this change as the resolution path for friends persistence
-- [ ] 6.5 Reference issue #25 in the PR with `Closes #25` once on-device QA passes
-- [ ] 6.6 Release-note: explicitly call out that ESP32 users on the new firmware will not see friends previously stored in NVS-Preferences (one-time loss; new format is LittleFS)
+- [x] 6.5 PR #28 referenced issue #25 with `Closes #25`; PR merged 2026-05-09 (`b878018`)
+- [ ] 6.6 Release-note: explicitly call out that ESP32 users on the new firmware will not see friends previously stored in NVS-Preferences (one-time loss; new format is LittleFS) — to be included in the next firmware release
 
 ## 7. Compose with brick-fix gate (deferred — no-op if P0/P1 not yet landed)
 
 - [ ] 7.1 If P0/P1 has landed before this change ships: confirm `NodeDB::saveProto` already routes through `safeToWrite()`; no action needed at the friends call site
-- [ ] 7.2 If P0/P1 has NOT landed when this change ships: leave a `// TODO(brick-fix-P0)` comment at the friends-save call site noting the future composition point; close the TODO when the gate lands
+- [x] 7.2 Confirmed P0/P1 had NOT landed at ship time. `// TODO(brick-fix-P0)` comment is in `patch-t114.py` and `patch-native.py` `PERSIST_SAVE_NEW` block, injected into `saveFriends()` body. Close when the gate lands
 - [ ] 7.3 Add an integration-test scenario once P0/P1 has landed: simulate radio-not-idle at the moment of friend mutation, assert the write is deferred and later drained successfully
