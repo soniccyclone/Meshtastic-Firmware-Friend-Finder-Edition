@@ -32,6 +32,13 @@ jobs:
           mkdir -p output
           docker run --rm -v "$PWD/output:/output" ff-builder
 
+      - name: Rename firmware asset to match release tag
+        id: asset
+        run: |
+          ASSET="friend-finder-${{ steps.tag.outputs.tag }}.uf2"
+          mv output/firmware.uf2 "output/${ASSET}"
+          echo "name=${ASSET}" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -44,11 +51,11 @@ jobs:
 
             ### Heltec T114 (nRF52840) — Experimental
 
-            Flash the attached `firmware.uf2` using the UF2 bootloader:
+            Flash the attached `${{ steps.asset.outputs.name }}` using the UF2 bootloader:
 
             1. Double-press the reset button on the T114 — a USB drive named `T114_BOOT` (or similar) will appear on your computer.
-            2. Drag and drop `firmware.uf2` onto that drive.
+            2. Drag and drop `${{ steps.asset.outputs.name }}` onto that drive.
             3. The device flashes automatically and reboots into the new firmware.
 
             See the [README](https://github.com/${{ github.repository }}/blob/main/README.md#heltec-t114-nrf52840--experimental) for full wiring and setup instructions.
-          files: output/firmware.uf2
+          files: output/${{ steps.asset.outputs.name }}
