@@ -44,11 +44,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Compute artifact name
+      - name: Compute artifact + asset names
         id: meta
         run: |
-          NAME="firmware-t114-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}"
-          echo "artifact=$NAME" >> "$GITHUB_OUTPUT"
+          PR="${{ github.event.pull_request.number }}"
+          SHORT="$(printf '%s' '${{ github.event.pull_request.head.sha }}' | cut -c1-12)"
+          # Asset name mirrors the release workflow's naming convention
+          # (friend-finder-<tag>.uf2) so a tester who downloads multiple RCs
+          # ends up with distinguishable .uf2 files instead of overwriting
+          # firmware.uf2 each time. The "rc" infix flags it as a PR build,
+          # not a tagged release.
+          ASSET="friend-finder-rc-pr${PR}-${SHORT}.uf2"
+          ARTIFACT="firmware-t114-pr${PR}-${SHORT}"
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
 
       - name: Build ff-builder image
         run: docker build -t ff-builder .
@@ -58,12 +67,15 @@ jobs:
           mkdir -p output
           docker run --rm -v "$PWD/output:/output" ff-builder
 
+      - name: Rename firmware asset to match PR build tag
+        run: mv output/firmware.uf2 "output/${{ steps.meta.outputs.asset }}"
+
       - name: Upload firmware artifact
         id: upload
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.artifact }}
-          path: output/firmware.uf2
+          path: output/${{ steps.meta.outputs.asset }}
           if-no-files-found: error
           retention-days: 30
 
@@ -73,13 +85,14 @@ jobs:
           script: |
             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const artifact = '${{ steps.meta.outputs.artifact }}';
+            const asset = '${{ steps.meta.outputs.asset }}';
             const sha = '${{ github.event.pull_request.head.sha }}'.slice(0, 12);
             const body = [
               `**RC build ready** for commit \`${sha}\`.`,
               ``,
               `Download: [\`${artifact}.zip\`](${runUrl}#artifacts) (from the workflow run's Artifacts section).`,
               ``,
-              `Unzip and flash \`firmware.uf2\` to a T114: double-press reset, drop the file onto the \`T114_BOOT\` drive that appears.`,
+              `Unzip and flash \`${asset}\` to a T114: double-press reset, drop the file onto the \`T114_BOOT\` drive that appears.`,
               ``,
               `_Artifacts expire after 30 days. RC builds are no longer published as GitHub Releases — they're scoped to this PR's workflow runs._`,
             ].join('\n');
