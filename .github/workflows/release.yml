@@ -3,6 +3,20 @@ name: Release T114 Firmware
 on:
   push:
     branches: [main]
+    # Skip pushes that only touch non-firmware-affecting files (specs, docs,
+    # markdown, agent config, etc.). If a push touches BOTH ignored AND
+    # source paths, the workflow still runs — paths-ignore only matches when
+    # *every* changed file is in the list. Add to the firmware-affecting set
+    # rather than this one when in doubt.
+    paths-ignore:
+      - '**/*.md'
+      - 'openspec/**'
+      - 'docs/**'
+      - 'img/**'
+      - 'firmware-examples/**'
+      - '.claude/**'
+      - '.beads/**'
+      - 'LICENSE'
 
 permissions:
   contents: write
