@@ -6,11 +6,11 @@ The brick-fix design doc (`docs/design/t114-brick-fix.md`, "Out of Scope") expli
 
 ## What Changes
 
-- Replace `FriendFinderModule`'s ESP32-only Preferences-based persistence with a LittleFS protobuf file at `/prefs/friends.proto`, available on both ESP32 and nRF52.
+- Replace `FriendFinderModule`'s `FF_HAVE_NVS`-gated, ESP32-only Preferences persistence with a LittleFS file at `/prefs/friends.proto` available on both ESP32 and nRF52. The on-disk format is a small versioned binary blob (header + packed `{node, session_id, secret[16]}` entries) — see design.md D1 for why this is preferable to forking the `meshtastic/protobufs` submodule.
 - Load the friends list during module init (after FS mount) and re-populate the in-RAM table from disk before the module starts servicing pair/track requests.
-- Save on every state transition that mutates the friends table: successful pairing completion, friend rename, friend removal. No periodic writes — event-driven only.
-- All writes go through `NodeDB::saveProto` with `fullAtomic = true` (the file is small enough — see design.md), and route through the P0/P1 `safeToWrite()` gate when that gate lands.
-- Ship the changes as a new patch block in `patch-t114.py` so the LeapYeet/firmware tree is mutated at build time, matching the existing patch architecture. No fork of upstream.
+- Save on every state transition that mutates the friends table: successful pairing completion (`upsertFriend`) and friend removal (`removeFriendByListIndex`). No periodic writes — event-driven only. Note: there is no per-friend display name in the upstream `FriendRecord` struct, so renames are not a thing here; names come from `NodeDB`.
+- All writes go through `NodeDB::saveProto` with `fullAtomic = true` (the file is ~200 bytes worst case), and route through the P0/P1 `safeToWrite()` gate when that gate lands.
+- Ship the changes as a new patch block in `patch-t114.py` plus a matching block in `patch-native.py`, so the LeapYeet/firmware tree is mutated at build time, matching the existing patch architecture. No fork of upstream.
 - **BREAKING (storage-layout only):** new `/prefs/friends.proto` file appears on disk. No backwards-compat concerns — there is no prior on-disk format for friends on nRF52 (RAM-only today), and ESP32 NVS-Preferences keys are independent of LittleFS files, so neither platform loses existing user data.
 
 ## Capabilities
