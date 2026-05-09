@@ -37,8 +37,10 @@ import sys
 
 VARIANT_INI = "variants/nrf52840/heltec_mesh_node_t114/platformio.ini"
 FRIEND_FINDER_CPP = "src/modules/FriendFinderModule.cpp"
+MENU_HANDLER_CPP = "src/graphics/draw/MenuHandler.cpp"
 MARKER = "# ff-builder patches"
 PERSIST_MARKER = "// ff-builder: persist friends to LittleFS"
+MENU_ORDERING_MARKER = "// ff-builder: menu ordering"
 
 INJECTED_FLAGS = """-DHELTEC_T114
   {marker}
@@ -299,7 +301,128 @@ def patch_friend_finder_persistence():
     print(f"Patched {FRIEND_FINDER_CPP}: friends persistence -> LittleFS")
 
 
+# --- Menu ordering (issue #27) -------------------------------------------
+#
+# Friend Finder is the headline feature of this fork but sits ~6th in
+# the Home Action menu, behind backlight/position/preset/freetext.
+# Track a Friend is the daily-driver action but sits below Start
+# Pairing (a one-time setup step). Both move to index 1 (immediately
+# after Back) per the spec at openspec/changes/reorder-friend-finder-menus/.
+#
+# Two menus, two patch shapes:
+#   - homeBaseMenu's callback dispatches on enum values, so the visual
+#     reorder is a pure block move; the callback is unchanged.
+#   - friendFinderBaseMenu's callback dispatches on literal selected==N
+#     indices, so reordering also requires renumbering the case branches
+#     in lockstep. The OLD/NEW span covers BOTH the push_back block and
+#     the callback body so the move is reviewable as one diff.
+
+# Anchored on homeBaseMenu's enum line — unique signature in the source.
+# Insert the Friend Finder option right after "int options = 1;".
+MENU_HOME_INSERT_OLD = """    enum optionsNumbers { Back, Backlight, Position, Preset, Freetext, FriendFinder, Bluetooth, Sleep, enumEnd };
+
+    static const char *optionsArray[enumEnd] = {"Back"};
+    static int optionsEnumArray[enumEnd] = {Back};
+    int options = 1;
+"""
+
+MENU_HOME_INSERT_NEW = """    enum optionsNumbers {{ Back, Backlight, Position, Preset, Freetext, FriendFinder, Bluetooth, Sleep, enumEnd }};
+
+    static const char *optionsArray[enumEnd] = {{"Back"}};
+    static int optionsEnumArray[enumEnd] = {{Back}};
+    int options = 1;
+
+    {marker} — Friend Finder hoisted to first actionable position (issue #27)
+    optionsArray[options] = "Friend Finder";
+    optionsEnumArray[options++] = FriendFinder;
+""".format(marker=MENU_ORDERING_MARKER)
+
+# Remove the original Friend Finder block (sits between Freetext block and
+# Bluetooth Toggle in upstream). Anchor on the Friend Finder + Bluetooth
+# pair, which is unique in the file.
+MENU_HOME_REMOVE_OLD = """    optionsArray[options] = "Friend Finder";
+    optionsEnumArray[options++] = FriendFinder;
+
+    optionsArray[options] = "Bluetooth Toggle";
+"""
+
+MENU_HOME_REMOVE_NEW = """    optionsArray[options] = "Bluetooth Toggle";
+"""
+
+# friendFinderBaseMenu push_back reorder: swap Start Pairing and Track a
+# Friend. Anchored on the two specific lines so we don't span the
+# trailing-whitespace lines below them.
+MENU_FRIEND_PUSHBACK_OLD = """    options.push_back("Start Pairing");
+    options.push_back("Track a Friend");
+"""
+
+MENU_FRIEND_PUSHBACK_NEW = """    options.push_back("Track a Friend");
+    options.push_back("Start Pairing");
+"""
+
+# friendFinderBaseMenu callback reorder: swap the bodies of selected==1
+# (was Start Pairing → now Track a Friend) and selected==2 (was Track a
+# Friend → now Start Pairing). Anchor span covers exactly those two
+# branches.
+MENU_FRIEND_CALLBACK_OLD = """        } else if (selected == 1) { // Start Pairing
+            if (friendFinderModule) friendFinderModule->beginPairing();
+        } else if (selected == 2) { // Track a Friend
+            if (friendFinderModule) {
+                if (!friendFinderModule->spoofModeEnabled && friendFinderModule->getUsedFriendsCount() == 0) {
+                    screen->showSimpleBanner("No friends saved", 1200);
+                } else {
+                    menuQueue = friend_finder_list_menu;
+                    screen->runNow();
+                }
+            }
+        } else if (selected == 3) { // Saved Places"""
+
+MENU_FRIEND_CALLBACK_NEW = """        }} else if (selected == 1) {{ // Track a Friend
+            if (friendFinderModule) {{
+                if (!friendFinderModule->spoofModeEnabled && friendFinderModule->getUsedFriendsCount() == 0) {{
+                    screen->showSimpleBanner("No friends saved", 1200);
+                }} else {{
+                    menuQueue = friend_finder_list_menu;
+                    screen->runNow();
+                }}
+            }}
+        }} else if (selected == 2) {{ // Start Pairing
+            if (friendFinderModule) friendFinderModule->beginPairing();
+        }} else if (selected == 3) {{ // Saved Places""".format()
+
+
+def patch_menu_ordering():
+    try:
+        with open(MENU_HANDLER_CPP) as f:
+            content = f.read()
+    except FileNotFoundError:
+        sys.exit(f"ERROR: {MENU_HANDLER_CPP} not found. Run from firmware source root.")
+
+    if MENU_ORDERING_MARKER in content:
+        print(f"Skipped {MENU_HANDLER_CPP}: menu ordering already patched")
+        return
+
+    if MENU_HOME_INSERT_OLD not in content:
+        sys.exit(f"ERROR: expected homeBaseMenu enum/options preamble in {MENU_HANDLER_CPP} not found")
+    if MENU_HOME_REMOVE_OLD not in content:
+        sys.exit(f"ERROR: expected original Friend Finder block in {MENU_HANDLER_CPP} not found")
+    if MENU_FRIEND_PUSHBACK_OLD not in content:
+        sys.exit(f"ERROR: expected friendFinderBaseMenu push_back pair in {MENU_HANDLER_CPP} not found")
+    if MENU_FRIEND_CALLBACK_OLD not in content:
+        sys.exit(f"ERROR: expected friendFinderBaseMenu callback span in {MENU_HANDLER_CPP} not found")
+
+    content = content.replace(MENU_HOME_INSERT_OLD, MENU_HOME_INSERT_NEW, 1)
+    content = content.replace(MENU_HOME_REMOVE_OLD, MENU_HOME_REMOVE_NEW, 1)
+    content = content.replace(MENU_FRIEND_PUSHBACK_OLD, MENU_FRIEND_PUSHBACK_NEW, 1)
+    content = content.replace(MENU_FRIEND_CALLBACK_OLD, MENU_FRIEND_CALLBACK_NEW, 1)
+
+    with open(MENU_HANDLER_CPP, "w") as f:
+        f.write(content)
+    print(f"Patched {MENU_HANDLER_CPP}: Friend Finder + Track a Friend hoisted to top")
+
+
 if __name__ == "__main__":
     patch_variant_ini()
     patch_friend_finder_include()
     patch_friend_finder_persistence()
+    patch_menu_ordering()
