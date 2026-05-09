@@ -29,17 +29,17 @@
 
 ## 5. Smoke test extension
 
-- [ ] 5.1 Extend `tests/smoke/pairing_test.py` with a sub-test: complete a pairing, restart the simulated node process, assert the persisted friend is visible in the post-restart friends list (via log markers like `[FriendFinder] Loaded N friends from disk` or a friends-list dump command)
-- [ ] 5.2 Add a sub-test: pair → kill simulator before clean shutdown → restart → assert friends list intact (covers crash-safety / atomic write requirement)
-- [ ] 5.3 Add a sub-test: write a `friends.proto` file with a deliberately-bumped header `version`, boot, assert load logs WARN about version mismatch and starts with empty friends list (covers version-mismatch graceful drop)
-- [ ] 5.4 Wire the new sub-tests into `entrypoint-smoke.sh` so CI runs them
+- [x] 5.1 Implemented as `tests/smoke/persistence_test.py` Phase 1+2: pair both nodes (reusing FF_NATIVE_AUTO_PAIR), verify `[FriendFinder] Persisted N friends to /prefs/friends.proto` log + file presence under each VFS root, SIGTERM both, restart with the same fsdirs, verify `[FriendFinder] Loaded 1 friends from /prefs/friends.proto` on each node. Local run PASSED end-to-end (file size 36 bytes = 12-byte header + 24-byte entry, matches design D1)
+- [ ] 5.2 SIGKILL crash-safety sub-test deferred: on the host filesystem, pkill mid-write would only catch a window of microseconds, so reproducing the failure mode reliably needs either fault injection at the syscall layer or driving the kill from inside the firmware via a debug pin — both higher-effort than the value they add given Phase 3 already exercises the validation-rejection path. Re-evaluate if a real corruption is observed in the field
+- [x] 5.3 Implemented as `persistence_test.py` Phase 3: write a `friends.proto` with a header version of 9999 into a fresh VFS root, boot, assert one of `bad magic` / `version/entry_size mismatch` / `truncated` WARN lines AND that no `Loaded N friends` line appears. Local run PASSED
+- [x] 5.4 Wired into `entrypoint-smoke.sh` (added `=== Running FriendFinder persistence integration test (issue #25) ===` block plus per-phase log copy-out to `/output/persistence-*.log`) and added to `Dockerfile.native` (`COPY tests/smoke/persistence_test.py /usr/local/bin/persistence_test.py` + `chmod +x`). Verified by rebuilding the image and running `entrypoint-smoke.sh` end-to-end; all three suites pass
 
 ## 6. CI and release
 
-- [ ] 6.1 Verify `pr-build-t114.yml` produces an RC UF2 with the new patch block applied (no patch-anchor failures)
-- [ ] 6.2 On-device QA: flash the RC onto a T114, pair two nodes, power-cycle, verify friends list is intact AND tracking still works without re-pairing (proves `secret[16]` survived)
-- [ ] 6.3 On-device QA: pair, remove friend, power-cycle, verify removed friend does not reappear
-- [ ] 6.4 Update `docs/design/t114-brick-fix.md` "Out of Scope" entry for friends persistence: replace "Separate issue." with a link to this change / its PR
+- [ ] 6.1 Verify `pr-build-t114.yml` produces an RC UF2 with the new patch block applied (no patch-anchor failures). Local `make build` succeeded (T114 firmware.uf2 produced, 96.5% flash usage — tight margin worth flagging in PR); CI will exercise the same path on push
+- [ ] 6.2 On-device QA: flash the RC onto a T114, pair two nodes, power-cycle, verify friends list is intact AND tracking still works without re-pairing (proves `secret[16]` survived) — needs hardware
+- [ ] 6.3 On-device QA: pair, remove friend, power-cycle, verify removed friend does not reappear — needs hardware
+- [x] 6.4 Updated `docs/design/t114-brick-fix.md:166` "Out of Scope" entry to reference this change as the resolution path for friends persistence
 - [ ] 6.5 Reference issue #25 in the PR with `Closes #25` once on-device QA passes
 - [ ] 6.6 Release-note: explicitly call out that ESP32 users on the new firmware will not see friends previously stored in NVS-Preferences (one-time loss; new format is LittleFS)
 

@@ -47,4 +47,19 @@ else
   python3 /usr/local/bin/pairing_test.py --program "$BIN" --workdir "$PAIRING_WORKDIR"
 fi
 
+echo "=== Running FriendFinder persistence integration test (issue #25) ==="
+PERSIST_WORKDIR=/tmp/ff-persist-work
+if [[ -d /output ]]; then
+  python3 /usr/local/bin/persistence_test.py \
+    --program "$BIN" \
+    --workdir "$PERSIST_WORKDIR" 2>&1 | tee /output/persistence.log
+  cp "$PERSIST_WORKDIR"/node-a-phase1.log /output/persistence-a-phase1.log 2>/dev/null || true
+  cp "$PERSIST_WORKDIR"/node-b-phase1.log /output/persistence-b-phase1.log 2>/dev/null || true
+  cp "$PERSIST_WORKDIR"/node-a-phase2.log /output/persistence-a-phase2.log 2>/dev/null || true
+  cp "$PERSIST_WORKDIR"/node-b-phase2.log /output/persistence-b-phase2.log 2>/dev/null || true
+  cp "$PERSIST_WORKDIR"/node-c-phase3.log /output/persistence-c-phase3.log 2>/dev/null || true
+else
+  python3 /usr/local/bin/persistence_test.py --program "$BIN" --workdir "$PERSIST_WORKDIR"
+fi
+
 echo "=== All integration tests complete ==="
