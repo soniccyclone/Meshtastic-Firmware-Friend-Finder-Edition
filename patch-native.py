@@ -79,6 +79,7 @@ MAG_CPP_MARKER = "// ff-builder native magnetometer guard"
 FF_AUTO_PAIR_MARKER = "// ff-builder native auto-pair patch"
 PERSIST_MARKER = "// ff-builder: persist friends to LittleFS"
 MENU_ORDERING_MARKER = "// ff-builder: menu ordering"
+MAG_POWER_MARKER = "// ff-builder: magnetometer power profile"
 MENU_HANDLER_CPP = "src/graphics/draw/MenuHandler.cpp"
 
 INI_ANCHOR = "-I variants/native/portduino"
@@ -644,6 +645,92 @@ def patch_menu_ordering():
     print(f"Patched {MENU_HANDLER_CPP}: Friend Finder + Track a Friend hoisted to top")
 
 
+# --- Magnetometer power profile (issue #32) ------------------------------
+#
+# Mirror of the magnetometer power-profile patch in patch-t114.py. The native
+# Portduino build does NOT compile MagnetometerModule.cpp's body at runtime
+# (the file is wrapped in `#if !defined(ARCH_PORTDUINO)` by patch_magnetometer_cpp
+# above), so these edits have no runtime effect under native — but they DO
+# need to apply to the same source tree so the smoke build sees byte-identical
+# upstream input as the T114 build. Applying both transforms keeps the patch
+# scripts synchronized; if the anchors disappear upstream, both fail loudly
+# in the same way.
+#
+# See openspec/changes/reduce-magnetometer-power-draw/{proposal,design}.md.
+
+MAG_POWER_CTRL1_OLD = """    // CTRL1: OSR=512 (00), RNG=2G (01), ODR=200Hz (11), MODE=continuous (01) -> 0x1D
+    if (!qmcWriteReg(bus, addr, QMC_REG_CTRL1, 0x1D)) {
+        LOG_INFO("[Magnetometer] QMC write CTRL1 failed");
+        return false;
+    }"""
+
+MAG_POWER_CTRL1_NEW = """    """ + MAG_POWER_MARKER + """ (issue #32)
+    // CTRL1: OSR=64 (11), RNG=2G (01), ODR=10Hz (00), MODE=continuous (01) -> 0xD1
+    if (!qmcWriteReg(bus, addr, QMC_REG_CTRL1, 0xD1)) {
+        LOG_INFO("[Magnetometer] QMC write CTRL1 failed");
+        return false;
+    }"""
+
+MAG_POWER_CTRL1_LOG_OLD = 'LOG_INFO("[Magnetometer] QMC configured (CONT mode, 200Hz, 2G, OSR512).");'
+MAG_POWER_CTRL1_LOG_NEW = 'LOG_INFO("[Magnetometer] QMC configured (CONT mode, 10Hz, 2G, OSR64).");'
+
+MAG_POWER_LIS3DH_OLD = """    if (haveAccel) {
+        LOG_INFO("[Magnetometer] LIS3DH detected on Wire1. Start Madgwick @20 Hz.");
+        filter.begin(20);
+    } else {"""
+
+MAG_POWER_LIS3DH_NEW = """    if (haveAccel) {
+        """ + MAG_POWER_MARKER + """ (issue #32)
+        lis.setDataRate(LIS3DH_DATARATE_25_HZ);
+        lis.setPerformanceMode(LIS3DH_MODE_LOW_POWER);
+        LOG_INFO("[Magnetometer] LIS3DH detected on Wire1. Configured 25Hz/low-power. Start Madgwick @10 Hz.");
+        filter.begin(10);
+    } else {"""
+
+MAG_POWER_POLL_OLD = """        lastLogMs = now;
+    }
+
+    return 50;
+}"""
+
+MAG_POWER_POLL_NEW = """        lastLogMs = now;
+    }
+
+    """ + MAG_POWER_MARKER + """ (issue #32) — match QMC ODR=10Hz
+    return 100;
+}"""
+
+
+def patch_magnetometer_power_profile():
+    try:
+        with open(MAG_CPP) as f:
+            content = f.read()
+    except FileNotFoundError:
+        sys.exit(f"ERROR: {MAG_CPP} not found. Run from firmware source root.")
+
+    if MAG_POWER_MARKER in content:
+        print(f"Skipped {MAG_CPP}: magnetometer power profile already patched")
+        return
+
+    if MAG_POWER_CTRL1_OLD not in content:
+        sys.exit(f"ERROR: expected QMC CTRL1=0x1D block in {MAG_CPP} not found")
+    if MAG_POWER_CTRL1_LOG_OLD not in content:
+        sys.exit(f"ERROR: expected QMC configured LOG_INFO in {MAG_CPP} not found")
+    if MAG_POWER_LIS3DH_OLD not in content:
+        sys.exit(f"ERROR: expected LIS3DH/Madgwick init block in {MAG_CPP} not found")
+    if MAG_POWER_POLL_OLD not in content:
+        sys.exit(f"ERROR: expected runOnce 'return 50;' tail in {MAG_CPP} not found")
+
+    content = content.replace(MAG_POWER_CTRL1_OLD, MAG_POWER_CTRL1_NEW, 1)
+    content = content.replace(MAG_POWER_CTRL1_LOG_OLD, MAG_POWER_CTRL1_LOG_NEW, 1)
+    content = content.replace(MAG_POWER_LIS3DH_OLD, MAG_POWER_LIS3DH_NEW, 1)
+    content = content.replace(MAG_POWER_POLL_OLD, MAG_POWER_POLL_NEW, 1)
+
+    with open(MAG_CPP, "w") as f:
+        f.write(content)
+    print(f"Patched {MAG_CPP}: QMC5883L 10Hz/OSR64 + LIS3DH 25Hz/low-power + 100ms poll")
+
+
 if __name__ == "__main__":
     patch_native_ini()
     patch_friend_finder_include()
@@ -652,3 +739,4 @@ if __name__ == "__main__":
     patch_friend_finder_auto_pair()
     patch_friend_finder_persistence()
     patch_menu_ordering()
+    patch_magnetometer_power_profile()

@@ -38,9 +38,11 @@ import sys
 VARIANT_INI = "variants/nrf52840/heltec_mesh_node_t114/platformio.ini"
 FRIEND_FINDER_CPP = "src/modules/FriendFinderModule.cpp"
 MENU_HANDLER_CPP = "src/graphics/draw/MenuHandler.cpp"
+MAG_CPP = "src/modules/MagnetometerModule.cpp"
 MARKER = "# ff-builder patches"
 PERSIST_MARKER = "// ff-builder: persist friends to LittleFS"
 MENU_ORDERING_MARKER = "// ff-builder: menu ordering"
+MAG_POWER_MARKER = "// ff-builder: magnetometer power profile"
 
 INJECTED_FLAGS = """-DHELTEC_T114
   {marker}
@@ -421,8 +423,106 @@ def patch_menu_ordering():
     print(f"Patched {MENU_HANDLER_CPP}: Friend Finder + Track a Friend hoisted to top")
 
 
+# --- Magnetometer power profile (issue #32) ------------------------------
+#
+# Upstream MagnetometerModule.cpp configures the QMC5883L at the highest-
+# current operating point (CTRL1 = 0x1D: OSR=512, ODR=200Hz, MODE=continuous)
+# and lets the Adafruit LIS3DH driver fall through to its 400Hz / normal-power
+# default (Adafruit_LIS3DH.cpp:138 — setDataRate(LIS3DH_DATARATE_400_HZ) is
+# the last line of begin()). Both rates are wildly above what the heading
+# pipeline consumes — Madgwick runs at 20Hz and the FriendFinder compass
+# redraws at display-frame rates well below that. On a 2000 mAh Maker Nova
+# pack the resulting continuous draw eats brown-out margin and correlates
+# with field crashes (issue #32).
+#
+# Drop both knobs to the lowest setting that still feeds a 10Hz fusion path
+# cleanly:
+#   - QMC5883L CTRL1: 0x1D -> 0xD1 (OSR=64, ODR=10Hz, RNG=2G, MODE=continuous)
+#   - LIS3DH: setDataRate(LIS3DH_DATARATE_25_HZ) +
+#             setPerformanceMode(LIS3DH_MODE_LOW_POWER) after begin()
+#   - Madgwick: filter.begin(20) -> filter.begin(10)
+#   - runOnce poll: return 50 -> return 100
+#
+# See openspec/changes/reduce-magnetometer-power-draw/{proposal,design}.md.
+
+MAG_CTRL1_OLD = """    // CTRL1: OSR=512 (00), RNG=2G (01), ODR=200Hz (11), MODE=continuous (01) -> 0x1D
+    if (!qmcWriteReg(bus, addr, QMC_REG_CTRL1, 0x1D)) {
+        LOG_INFO("[Magnetometer] QMC write CTRL1 failed");
+        return false;
+    }"""
+
+MAG_CTRL1_NEW = """    """ + MAG_POWER_MARKER + """ (issue #32)
+    // CTRL1: OSR=64 (11), RNG=2G (01), ODR=10Hz (00), MODE=continuous (01) -> 0xD1
+    if (!qmcWriteReg(bus, addr, QMC_REG_CTRL1, 0xD1)) {
+        LOG_INFO("[Magnetometer] QMC write CTRL1 failed");
+        return false;
+    }"""
+
+MAG_CTRL1_LOG_OLD = 'LOG_INFO("[Magnetometer] QMC configured (CONT mode, 200Hz, 2G, OSR512).");'
+MAG_CTRL1_LOG_NEW = 'LOG_INFO("[Magnetometer] QMC configured (CONT mode, 10Hz, 2G, OSR64).");'
+
+MAG_LIS3DH_OLD = """    if (haveAccel) {
+        LOG_INFO("[Magnetometer] LIS3DH detected on Wire1. Start Madgwick @20 Hz.");
+        filter.begin(20);
+    } else {"""
+
+MAG_LIS3DH_NEW = """    if (haveAccel) {
+        """ + MAG_POWER_MARKER + """ (issue #32)
+        lis.setDataRate(LIS3DH_DATARATE_25_HZ);
+        lis.setPerformanceMode(LIS3DH_MODE_LOW_POWER);
+        LOG_INFO("[Magnetometer] LIS3DH detected on Wire1. Configured 25Hz/low-power. Start Madgwick @10 Hz.");
+        filter.begin(10);
+    } else {"""
+
+# Anchor on the runOnce tail. `return 50;` appears exactly once in this file
+# (verified by grep), but we span more context for review legibility.
+MAG_POLL_OLD = """        lastLogMs = now;
+    }
+
+    return 50;
+}"""
+
+MAG_POLL_NEW = """        lastLogMs = now;
+    }
+
+    """ + MAG_POWER_MARKER + """ (issue #32) — match QMC ODR=10Hz
+    return 100;
+}"""
+
+
+def patch_magnetometer_power_profile():
+    try:
+        with open(MAG_CPP) as f:
+            content = f.read()
+    except FileNotFoundError:
+        sys.exit(f"ERROR: {MAG_CPP} not found. Run from firmware source root.")
+
+    if MAG_POWER_MARKER in content:
+        print(f"Skipped {MAG_CPP}: magnetometer power profile already patched")
+        return
+
+    if MAG_CTRL1_OLD not in content:
+        sys.exit(f"ERROR: expected QMC CTRL1=0x1D block in {MAG_CPP} not found")
+    if MAG_CTRL1_LOG_OLD not in content:
+        sys.exit(f"ERROR: expected QMC configured LOG_INFO in {MAG_CPP} not found")
+    if MAG_LIS3DH_OLD not in content:
+        sys.exit(f"ERROR: expected LIS3DH/Madgwick init block in {MAG_CPP} not found")
+    if MAG_POLL_OLD not in content:
+        sys.exit(f"ERROR: expected runOnce 'return 50;' tail in {MAG_CPP} not found")
+
+    content = content.replace(MAG_CTRL1_OLD, MAG_CTRL1_NEW, 1)
+    content = content.replace(MAG_CTRL1_LOG_OLD, MAG_CTRL1_LOG_NEW, 1)
+    content = content.replace(MAG_LIS3DH_OLD, MAG_LIS3DH_NEW, 1)
+    content = content.replace(MAG_POLL_OLD, MAG_POLL_NEW, 1)
+
+    with open(MAG_CPP, "w") as f:
+        f.write(content)
+    print(f"Patched {MAG_CPP}: QMC5883L 10Hz/OSR64 + LIS3DH 25Hz/low-power + 100ms poll")
+
+
 if __name__ == "__main__":
     patch_variant_ini()
     patch_friend_finder_include()
     patch_friend_finder_persistence()
     patch_menu_ordering()
+    patch_magnetometer_power_profile()

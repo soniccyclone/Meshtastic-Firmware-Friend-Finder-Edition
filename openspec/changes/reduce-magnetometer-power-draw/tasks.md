@@ -2,14 +2,14 @@
 
 ## 1. Patch infrastructure
 
-- [ ] 1.1 Add `MAG_POWER_MARKER = "// ff-builder: magnetometer power profile"` near the existing markers in `patch-t114.py`.
-- [ ] 1.2 Add a `patch_magnetometer_qmc_ctrl1()` function in `patch-t114.py` that opens `src/modules/MagnetometerModule.cpp`, anchors on `if (!qmcWriteReg(bus, addr, QMC_REG_CTRL1, 0x1D)) {`, rewrites the `0x1D` literal to `0xD1` (with the marker comment on the line above), and rewrites the adjacent `LOG_INFO("[Magnetometer] QMC configured (CONT mode, 200Hz, 2G, OSR512).")` to `LOG_INFO("[Magnetometer] QMC configured (CONT mode, 10Hz, 2G, OSR64).")`. Idempotent: if the marker is already present, print "skipped" and return.
-- [ ] 1.3 Add a `patch_magnetometer_lis3dh_lowpower()` function in `patch-t114.py` that anchors on the `if (haveAccel) {` body containing `filter.begin(20);`, and rewrites the body to call `lis.setDataRate(LIS3DH_DATARATE_25_HZ);` and `lis.setPerformanceMode(LIS3DH_MODE_LOW_POWER);` before `filter.begin(10);`. Update the adjacent `LOG_INFO` string to reflect the new rate. Idempotent on the marker.
-- [ ] 1.4 Add a `patch_magnetometer_poll_period()` function in `patch-t114.py` that anchors on `return 50;` paired with a unique surrounding line (the preceding `lastLogMs = now;\n        }\n` block) to disambiguate from any other `return 50;` in the file, and replaces it with `return 100;` plus the marker. Idempotent on the marker.
-- [ ] 1.5 Wire the three new patch functions into `main()` in `patch-t114.py`, after the existing patch calls.
-- [ ] 1.6 Mirror tasks 1.1–1.5 in `patch-native.py` so the Portduino smoke build sees the same source tree.
-- [ ] 1.7 From a freshly-cloned upstream tree at `$FIRMWARE_SRC`, run `python3 patch-t114.py` once and confirm: (a) the three new blocks each print a "Patched" line; (b) `MagnetometerModule.cpp` now contains `0xD1`, `LIS3DH_DATARATE_25_HZ`, `LIS3DH_MODE_LOW_POWER`, `filter.begin(10)`, and `return 100;`; (c) running it a second time prints three "skipped" lines and produces no further file modifications (`git diff` is empty).
-- [ ] 1.8 Same idempotency check for `patch-native.py` against a freshly-cloned upstream tree.
+- [x] 1.1 Add `MAG_POWER_MARKER = "// ff-builder: magnetometer power profile"` near the existing markers in `patch-t114.py`.
+- [x] 1.2 Add a CTRL1-block patch in `patch-t114.py` that anchors on the `if (!qmcWriteReg(bus, addr, QMC_REG_CTRL1, 0x1D)) {` block and the adjacent post-config `LOG_INFO`, rewriting `0x1D` → `0xD1` (with marker comment above) and `200Hz/2G/OSR512` → `10Hz/2G/OSR64` in the log string. (Implemented as part of `patch_magnetometer_power_profile()` — kept as one function rather than three so the four anchor checks fail loudly together if upstream drifts.) Idempotent on the marker.
+- [x] 1.3 In the same `patch_magnetometer_power_profile()`, anchor on the `if (haveAccel) {` body containing `filter.begin(20);`, and rewrite to call `lis.setDataRate(LIS3DH_DATARATE_25_HZ);` and `lis.setPerformanceMode(LIS3DH_MODE_LOW_POWER);` before `filter.begin(10);`. LOG_INFO text updated.
+- [x] 1.4 Same function: anchor on the `lastLogMs = now;\n    }\n\n    return 50;\n}` runOnce-tail block (verified `return 50;` is unique in the file) and replace `return 50;` with `return 100;` plus the marker comment.
+- [x] 1.5 Wire `patch_magnetometer_power_profile()` into `main()` in `patch-t114.py`, after the existing patch calls.
+- [x] 1.6 Mirror tasks 1.1–1.5 in `patch-native.py`.
+- [x] 1.7 From the firmware tree at `$FIRMWARE_SRC`, ran `python3 patch-t114.py` from a clean state: all five blocks (variant.ini, FF include, FF persistence, menu ordering, mag power profile) printed "Patched" lines. Confirmed `MagnetometerModule.cpp` now contains `0xD1`, `LIS3DH_DATARATE_25_HZ`, `LIS3DH_MODE_LOW_POWER`, `filter.begin(10)`, `return 100;` and zero `0x1D` / zero `return 50;` instances. Re-running printed five "Skipped" lines with no further file modifications.
+- [x] 1.8 Same dance for `patch-native.py`: from clean, all eight blocks patched (native ini, FF include, mag header, mag cpp wrap, FF auto-pair, FF persistence, menu ordering, mag power profile). Re-run printed eight "Skipped" lines.
 
 ## 2. Build verification
 
@@ -27,5 +27,5 @@
 
 ## 4. Capability spec
 
-- [ ] 4.1 Verify that `openspec/changes/reduce-magnetometer-power-draw/specs/magnetometer-power-profile/spec.md` exists with the ADDED requirements covering CTRL1 value, LIS3DH config, poll period, fusion rate, and patch idempotency.
+- [x] 4.1 `openspec/changes/reduce-magnetometer-power-draw/specs/magnetometer-power-profile/spec.md` exists with five ADDED requirements covering CTRL1 value, LIS3DH config, poll period, fusion rate, and patch idempotency.
 - [ ] 4.2 After the change archives, the spec content moves to `openspec/specs/magnetometer-power-profile/spec.md` (handled by the archive workflow; not a manual step here).
