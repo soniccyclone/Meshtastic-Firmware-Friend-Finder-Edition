@@ -1,22 +1,22 @@
 ## 1. Patch — `patch-t114.py`
 
-- [ ] 1.1 Add a `MENU_ORDERING_MARKER` constant to the script header (e.g. `// ff-builder: menu ordering`)
-- [ ] 1.2 Add `patch_menu_ordering()` function with an early-return idempotency check (`if MENU_ORDERING_MARKER in content: return`)
-- [ ] 1.3 Implement the `homeBaseMenu` reorder per design.md D3: move the two-line `"Friend Finder"` assignment block from its current position (between Freetext and Bluetooth) to immediately after `int options = 1;`. Old/New strings span enough context to make the move unique and review-able
-- [ ] 1.4 Implement the `friendFinderBaseMenu` reorder per design.md D2: in a single old/new replacement, move `options.push_back("Track a Friend");` from line 1563 → between `"Back"` and `"Start Pairing"`, AND swap the case-branch logic so `selected == 1` runs the Track-a-Friend action and `selected == 2` runs the Start-Pairing action
-- [ ] 1.5 Hook `patch_menu_ordering()` into `if __name__ == "__main__":`
-- [ ] 1.6 Verify idempotency: run `patch-t114.py` twice on a fresh `LeapYeet/firmware` clone @ `f49f9b7` (or current pinned SHA); second run prints "skipped" and produces no further file modifications
+- [x] 1.1 Added `MENU_ORDERING_MARKER = "// ff-builder: menu ordering"` and `MENU_HANDLER_CPP` path constants
+- [x] 1.2 Added `patch_menu_ordering()` with early-return idempotency check on `MENU_ORDERING_MARKER in content`
+- [x] 1.3 Implemented `homeBaseMenu` reorder via two surgical replacements (`MENU_HOME_INSERT_*` + `MENU_HOME_REMOVE_*`) instead of one giant span — avoids the trailing-whitespace-line trap on line 502 of upstream `MenuHandler.cpp`. Anchor on the unique `enum optionsNumbers { Back, Backlight, ... };` line
+- [x] 1.4 Implemented `friendFinderBaseMenu` reorder via two surgical replacements (`MENU_FRIEND_PUSHBACK_*` + `MENU_FRIEND_CALLBACK_*`) — push_back swap is independent from the callback swap, both anchored on whitespace-clean spans. Same surgical approach as 1.3 for the same reason (trailing spaces on the "Saved Places"/"Compass Cal" lines just below)
+- [x] 1.5 Hooked `patch_menu_ordering()` into `if __name__ == "__main__":` after `patch_friend_finder_persistence()`
+- [x] 1.6 Verified idempotency: ran `patch-t114.py` twice on a fresh upstream `LeapYeet/firmware` clone, second run prints `Skipped src/graphics/draw/MenuHandler.cpp: menu ordering already patched`
 
 ## 2. Patch — `patch-native.py`
 
-- [ ] 2.1 Mirror the same `MENU_ORDERING_MARKER` + `patch_menu_ordering()` block in `patch-native.py`. Native and T114 share the same `MenuHandler.cpp`, so the patch text is identical
-- [ ] 2.2 Hook into `if __name__ == "__main__":` after the existing patch functions
-- [ ] 2.3 Verify idempotency on a fresh clone
+- [x] 2.1 Mirrored the same `MENU_ORDERING_MARKER`, `MENU_HANDLER_CPP`, and `patch_menu_ordering()` block in `patch-native.py`. Native and T114 share the same `MenuHandler.cpp`, so the patch text is identical (just bare strings, no `.format()` for the parts that don't need substitution)
+- [x] 2.2 Hooked `patch_menu_ordering()` into `patch-native.py`'s `if __name__ == "__main__":` after `patch_friend_finder_persistence()`
+- [x] 2.3 Verified idempotency on a fresh clone (after resetting `MenuHandler.cpp` to upstream)
 
 ## 3. Build verification
 
-- [ ] 3.1 `make build` produces a clean T114 `firmware.uf2` with the patch applied (no patch-anchor failures, no compile errors)
-- [ ] 3.2 `podman build -t ff-builder-native:local -f Dockerfile.native .` + `podman run --entrypoint entrypoint-smoke.sh` still passes the existing smoke suite — no regression in the persistence test or pairing test
+- [x] 3.1 `make build` succeeded — clean T114 `firmware.uf2` produced with the menu-reorder patch applied. No patch-anchor failures, no compile errors
+- [x] 3.2 Native image rebuilt + full smoke suite (two_node_smoke, pairing_test, persistence_test) passed end-to-end. Note: `pairing_test` is intermittently flaky (~20% on a sample of 5 runs) due to a pre-existing race in the pairing protocol when both nodes happen to broadcast REQUEST simultaneously and one node ends up interpreting the other's ACCEPT as a proposal. Unrelated to this change — the menu reorder doesn't touch any radio/protocol code path. Logged for awareness; not blocking
 
 ## 4. On-device QA
 
