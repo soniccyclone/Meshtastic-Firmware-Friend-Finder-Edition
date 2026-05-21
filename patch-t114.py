@@ -38,9 +38,14 @@ import sys
 VARIANT_INI = "variants/nrf52840/heltec_mesh_node_t114/platformio.ini"
 FRIEND_FINDER_CPP = "src/modules/FriendFinderModule.cpp"
 MENU_HANDLER_CPP = "src/graphics/draw/MenuHandler.cpp"
+REDIRECTABLE_PRINT_CPP = "src/RedirectablePrint.cpp"
+MAIN_CPP = "src/main.cpp"
+CRASHLOG_H = "src/CrashLog.h"
+CRASHLOG_CPP = "src/CrashLog.cpp"
 MARKER = "# ff-builder patches"
 PERSIST_MARKER = "// ff-builder: persist friends to LittleFS"
 MENU_ORDERING_MARKER = "// ff-builder: menu ordering"
+CRASHLOG_MARKER = "// ff-builder: crashlog persistence"
 
 INJECTED_FLAGS = """-DHELTEC_T114
   {marker}
@@ -421,8 +426,386 @@ def patch_menu_ordering():
     print(f"Patched {MENU_HANDLER_CPP}: Friend Finder + Track a Friend hoisted to top")
 
 
+# --- Crash-log persistence (issue ff-gh8) --------------------------------
+#
+# The T114 has a crash that only reproduces when the device is not tethered
+# to a computer — by definition the serial console is unavailable at crash
+# time. To recover the lead-up to the crash, we add a 2 KiB in-RAM ring
+# buffer in a new src/CrashLog.{h,cpp} module that the logger appends every
+# log line into, plus a 2 s periodic that snapshots the ring to
+# /prefs/crashlog.bin on LittleFS / InternalFS via SafeFile. On the next
+# boot, fsInit() is followed by a dump of that file to serial (prefixed
+# [CRASHLOG-BEGIN] / [CRASHLOG-END]) and the file is removed.
+#
+# Three edits to upstream:
+#   1. Create src/CrashLog.h + src/CrashLog.cpp (owns ring + flush + dump).
+#   2. Patch src/RedirectablePrint.cpp to call CrashLog::append() right
+#      after log_to_ble() inside the existing inDebugPrint critical section
+#      (line ~344). The append routine is pure memcpy — no FS, no LOG_* —
+#      because the inDebugPrint mutex is non-recursive.
+#   3. Patch src/main.cpp to call CrashLog::dumpIfPresent() right after
+#      fsInit() and register a concurrency::Periodic for the flusher,
+#      mirroring the ledPeriodic registration two lines above fsInit().
+#
+# Notes:
+#   - SafeFile is used with fullAtomic=false; a torn write of a debug
+#     breadcrumb is preferable to doubling the on-disk footprint on the
+#     ~28 KiB InternalFS partition. The file is rewritten in full each
+#     flush (LittleFS handles wear-leveling).
+#   - flush() reads ring/head/wrapped without holding inDebugPrint (the
+#     mutex is non-recursive and the periodic runs on a different task);
+#     the worst case is a torn line on the last few bytes, which is fine
+#     for a debug aid.
+#   - No new protobuf config knob — feature is always on. We can yank the
+#     whole patch once the crash is found.
+
+CRASHLOG_H_BODY = """#pragma once
+// ff-builder: crashlog persistence (issue ff-gh8)
+//
+// In-RAM ring buffer of recent LOG_* lines, periodically flushed to
+// /prefs/crashlog.bin so a crash that occurs while the device is not
+// connected to a computer can still be diagnosed on the next boot.
+
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
+
+namespace CrashLog {
+
+// Sized to fit comfortably alongside friends.proto on the nRF52 InternalFS
+// (~28 KiB usable). At ~80 chars/line this holds ~25 recent log lines.
+constexpr size_t RING_SIZE = 2048;
+
+// Called from RedirectablePrint::log() while the inDebugPrint mutex is
+// held. Must NOT call any LOG_* macro and must NOT touch the filesystem;
+// the mutex is non-recursive and a recursive log call would deadlock.
+void append(const char *logLevel, const char *format, va_list arg);
+
+// Snapshot the ring and write it to flash. Intended to be driven by a
+// concurrency::Periodic at ~2 s cadence; safe to call from any task.
+void flush();
+
+// Read /prefs/crashlog.bin if present, emit it to the serial console
+// (between [CRASHLOG-BEGIN] / [CRASHLOG-END] markers), then unlink it.
+// Call once at boot, after fsInit().
+void dumpIfPresent();
+
+// Periodic-task callback wrapping flush(). Returns the next interval in ms.
+int32_t periodicFlush();
+
+} // namespace CrashLog
+"""
+
+CRASHLOG_CPP_BODY = """// ff-builder: crashlog persistence (issue ff-gh8) — implementation
+//
+// See CrashLog.h for the contract. The ring buffer is appended to by
+// RedirectablePrint::log() inside the inDebugPrint critical section, so
+// append() does not need its own mutex. flush() runs on a different task
+// (the periodic) and reads the ring racily — a torn line on the tail is
+// acceptable for a debug aid; the alternative (acquiring inDebugPrint here)
+// would risk deadlock if SafeFile ever logged during the write.
+
+#include "CrashLog.h"
+
+#include "FSCommon.h"
+#include "RedirectablePrint.h"
+#include "SPILock.h"
+#include "SafeFile.h"
+#include "SerialConsole.h"
+#include "concurrency/LockGuard.h"
+#include "configuration.h"
+
+#include <Arduino.h>
+#include <cstdio>
+#include <cstring>
+
+extern SerialConsole *console;
+
+namespace CrashLog {
+namespace {
+
+constexpr uint32_t FILE_MAGIC = 0x434c4f47u; // 'CLOG'
+constexpr uint16_t FILE_VERSION = 1;
+constexpr const char *FILE_PATH = "/prefs/crashlog.bin";
+
+struct FileHeader {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t len;          // bytes of valid payload after this header
+    uint32_t boot_millis;  // millis() at the time of the write
+};
+static_assert(sizeof(FileHeader) == 12, "crashlog header size drift");
+
+char ring[RING_SIZE];
+size_t head = 0;
+bool wrapped = false;
+volatile bool dirty = false;
+
+inline void putc_ring(char c)
+{
+    ring[head++] = c;
+    if (head >= RING_SIZE) {
+        head = 0;
+        wrapped = true;
+    }
+}
+
+inline void put_ring(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; ++i)
+        putc_ring(s[i]);
+}
+
+} // namespace
+
+void append(const char *logLevel, const char *format, va_list arg)
+{
+    // One-character level prefix (D/I/W/E/C/T) + space, then fixed-width
+    // millis() in hex so columns line up across lines.
+    char prefix[2];
+    prefix[0] = (logLevel && logLevel[0]) ? logLevel[0] : '?';
+    prefix[1] = ' ';
+
+    char tbuf[12];
+    int tlen = snprintf(tbuf, sizeof(tbuf), "%08lx ", (unsigned long)millis());
+    if (tlen < 0 || (size_t)tlen >= sizeof(tbuf))
+        tlen = 0;
+
+    // Stack buffer for the formatted line. Sized to match upstream
+    // RedirectablePrint::vprintf's printBuf (160) plus headroom; lines
+    // longer than this are truncated with a trailing newline.
+    char line[224];
+    va_list copy;
+    va_copy(copy, arg);
+    int n = vsnprintf(line, sizeof(line), format, copy);
+    va_end(copy);
+    if (n < 0)
+        return;
+    if ((size_t)n >= sizeof(line)) {
+        n = (int)sizeof(line) - 1;
+        line[sizeof(line) - 2] = '\\n';
+    }
+
+    put_ring(prefix, 2);
+    if (tlen > 0)
+        put_ring(tbuf, (size_t)tlen);
+    put_ring(line, (size_t)n);
+    dirty = true;
+}
+
+void flush()
+{
+#ifdef FSCom
+    if (!dirty)
+        return;
+
+    // Snapshot the ring into a local buffer. We deliberately do not hold
+    // RedirectablePrint::inDebugPrint here: the mutex is non-recursive and
+    // SafeFile may call into code paths that LOG_* on error, which would
+    // re-enter the logger and deadlock. Torn-tail risk is acceptable.
+    char snap[RING_SIZE];
+    size_t snap_len;
+    if (wrapped) {
+        size_t a = RING_SIZE - head;
+        memcpy(snap, ring + head, a);
+        memcpy(snap + a, ring, head);
+        snap_len = RING_SIZE;
+    } else {
+        snap_len = head;
+        memcpy(snap, ring, snap_len);
+    }
+    dirty = false;
+
+    if (snap_len == 0)
+        return;
+
+    {
+        concurrency::LockGuard g(spiLock);
+        FSCom.mkdir("/prefs");
+    }
+
+    FileHeader hdr{};
+    hdr.magic = FILE_MAGIC;
+    hdr.version = FILE_VERSION;
+    hdr.len = (uint16_t)snap_len;
+    hdr.boot_millis = (uint32_t)millis();
+
+    SafeFile sf(FILE_PATH, /*fullAtomic=*/false);
+    sf.write(reinterpret_cast<const uint8_t *>(&hdr), sizeof(hdr));
+    sf.write(reinterpret_cast<const uint8_t *>(snap), snap_len);
+    if (!sf.close()) {
+        // Don't LOG_ here — would re-enter the logger. Mark dirty so the
+        // next periodic retries.
+        dirty = true;
+    }
+#endif
+}
+
+void dumpIfPresent()
+{
+#ifdef FSCom
+    auto file = FSCom.open(FILE_PATH, FILE_O_READ);
+    if (!file)
+        return;
+    FileHeader hdr{};
+    if (file.read(reinterpret_cast<uint8_t *>(&hdr), sizeof(hdr)) != sizeof(hdr) ||
+        hdr.magic != FILE_MAGIC || hdr.version != FILE_VERSION) {
+        file.close();
+        FSCom.remove(FILE_PATH);
+        return;
+    }
+
+    if (console) {
+        console->println();
+        console->println("[CRASHLOG-BEGIN] recovered from prior boot");
+    }
+    char buf[64];
+    size_t remaining = hdr.len;
+    while (remaining > 0) {
+        size_t want = remaining < sizeof(buf) ? remaining : sizeof(buf);
+        int got = file.read(reinterpret_cast<uint8_t *>(buf), want);
+        if (got <= 0)
+            break;
+        if (console) {
+            // SerialConsole overrides only write(uint8_t) and hides the
+            // base bulk-write overload; cast to Print* to reach it.
+            static_cast<Print *>(console)->write(reinterpret_cast<const uint8_t *>(buf), (size_t)got);
+        }
+        remaining -= (size_t)got;
+    }
+    file.close();
+    if (console) {
+        console->println();
+        console->println("[CRASHLOG-END]");
+    }
+    FSCom.remove(FILE_PATH);
+#endif
+}
+
+int32_t periodicFlush()
+{
+    flush();
+    return 2000; // ms
+}
+
+} // namespace CrashLog
+"""
+
+# Anchor + hook in RedirectablePrint::log(). The three existing sinks fan
+# out at line 342-344 of upstream RedirectablePrint.cpp; we insert a fourth
+# call right after log_to_ble. The anchor span includes the va_end below to
+# uniquely identify the location and to make the diff easy to review.
+CRASHLOG_HOOK_OLD = """        log_to_serial(logLevel, newFormat, arg);
+        log_to_syslog(logLevel, newFormat, arg);
+        log_to_ble(logLevel, newFormat, arg);
+
+        va_end(arg);"""
+
+CRASHLOG_HOOK_NEW = """        log_to_serial(logLevel, newFormat, arg);
+        log_to_syslog(logLevel, newFormat, arg);
+        log_to_ble(logLevel, newFormat, arg);
+        CrashLog::append(logLevel, newFormat, arg); {marker}
+
+        va_end(arg);""".format(marker=CRASHLOG_MARKER)
+
+CRASHLOG_INCLUDE_OLD = """#include "RedirectablePrint.h"
+#include "NodeDB.h"
+#include "RTC.h"
+#include "concurrency/OSThread.h"
+#include "configuration.h\""""
+
+CRASHLOG_INCLUDE_NEW = """#include "RedirectablePrint.h"
+#include "CrashLog.h" {marker}
+#include "NodeDB.h"
+#include "RTC.h"
+#include "concurrency/OSThread.h"
+#include "configuration.h\"""".format(marker=CRASHLOG_MARKER)
+
+# main.cpp wiring. The fsInit() call lives at upstream line 524; we hook
+# dumpIfPresent() right after it and register the Periodic right after
+# OSThread::setup() finishes (mirroring how ledPeriodic is created).
+CRASHLOG_MAIN_INCLUDE_OLD = """#include \"concurrency/OSThread.h\"
+#include \"concurrency/Periodic.h\""""
+
+CRASHLOG_MAIN_INCLUDE_NEW = """#include \"concurrency/OSThread.h\"
+#include \"concurrency/Periodic.h\"
+#include \"CrashLog.h\" {marker}""".format(marker=CRASHLOG_MARKER)
+
+CRASHLOG_MAIN_FSINIT_OLD = """    fsInit();
+
+#if !MESHTASTIC_EXCLUDE_I2C"""
+
+CRASHLOG_MAIN_FSINIT_NEW = """    fsInit();
+    CrashLog::dumpIfPresent(); {marker}
+    static concurrency::Periodic *crashLogPeriodic = new concurrency::Periodic("CrashLogFlush", CrashLog::periodicFlush);
+    (void)crashLogPeriodic;
+
+#if !MESHTASTIC_EXCLUDE_I2C""".format(marker=CRASHLOG_MARKER)
+
+
+def _write_if_missing(path, body, label):
+    try:
+        with open(path) as f:
+            existing = f.read()
+        if CRASHLOG_MARKER in existing:
+            print(f"Skipped {path}: already created")
+            return
+        # Refuse to clobber an unexpected pre-existing file.
+        sys.exit(f"ERROR: {path} already exists and is not a ff-builder file")
+    except FileNotFoundError:
+        pass
+    with open(path, "w") as f:
+        f.write(body)
+    print(f"Created {path}: {label}")
+
+
+def patch_crashlog():
+    # 1. Drop in the two new source files.
+    _write_if_missing(CRASHLOG_H, CRASHLOG_H_BODY, "CrashLog header")
+    _write_if_missing(CRASHLOG_CPP, CRASHLOG_CPP_BODY, "CrashLog implementation")
+
+    # 2. Hook the logger to call CrashLog::append() and pull in the header.
+    try:
+        with open(REDIRECTABLE_PRINT_CPP) as f:
+            rp = f.read()
+    except FileNotFoundError:
+        sys.exit(f"ERROR: {REDIRECTABLE_PRINT_CPP} not found. Run from firmware source root.")
+    if CRASHLOG_MARKER in rp:
+        print(f"Skipped {REDIRECTABLE_PRINT_CPP}: crashlog hook already patched")
+    else:
+        if CRASHLOG_INCLUDE_OLD not in rp:
+            sys.exit(f"ERROR: expected include preamble in {REDIRECTABLE_PRINT_CPP} not found")
+        if CRASHLOG_HOOK_OLD not in rp:
+            sys.exit(f"ERROR: expected log_to_* fan-out block in {REDIRECTABLE_PRINT_CPP} not found")
+        rp = rp.replace(CRASHLOG_INCLUDE_OLD, CRASHLOG_INCLUDE_NEW, 1)
+        rp = rp.replace(CRASHLOG_HOOK_OLD, CRASHLOG_HOOK_NEW, 1)
+        with open(REDIRECTABLE_PRINT_CPP, "w") as f:
+            f.write(rp)
+        print(f"Patched {REDIRECTABLE_PRINT_CPP}: CrashLog::append() hook")
+
+    # 3. Wire dumpIfPresent() + periodic flush into main.cpp.
+    try:
+        with open(MAIN_CPP) as f:
+            mc = f.read()
+    except FileNotFoundError:
+        sys.exit(f"ERROR: {MAIN_CPP} not found. Run from firmware source root.")
+    if CRASHLOG_MARKER in mc:
+        print(f"Skipped {MAIN_CPP}: crashlog wiring already patched")
+        return
+    if CRASHLOG_MAIN_INCLUDE_OLD not in mc:
+        sys.exit(f"ERROR: expected concurrency include pair in {MAIN_CPP} not found")
+    if CRASHLOG_MAIN_FSINIT_OLD not in mc:
+        sys.exit(f"ERROR: expected fsInit()/I2C anchor in {MAIN_CPP} not found")
+    mc = mc.replace(CRASHLOG_MAIN_INCLUDE_OLD, CRASHLOG_MAIN_INCLUDE_NEW, 1)
+    mc = mc.replace(CRASHLOG_MAIN_FSINIT_OLD, CRASHLOG_MAIN_FSINIT_NEW, 1)
+    with open(MAIN_CPP, "w") as f:
+        f.write(mc)
+    print(f"Patched {MAIN_CPP}: CrashLog dump + periodic flush wired")
+
+
 if __name__ == "__main__":
     patch_variant_ini()
     patch_friend_finder_include()
     patch_friend_finder_persistence()
     patch_menu_ordering()
+    patch_crashlog()
