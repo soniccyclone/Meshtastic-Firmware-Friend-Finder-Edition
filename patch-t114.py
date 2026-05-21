@@ -38,9 +38,11 @@ import sys
 VARIANT_INI = "variants/nrf52840/heltec_mesh_node_t114/platformio.ini"
 FRIEND_FINDER_CPP = "src/modules/FriendFinderModule.cpp"
 MENU_HANDLER_CPP = "src/graphics/draw/MenuHandler.cpp"
+MAIN_NRF52_CPP = "src/platform/nrf52/main-nrf52.cpp"
 MARKER = "# ff-builder patches"
 PERSIST_MARKER = "// ff-builder: persist friends to LittleFS"
 MENU_ORDERING_MARKER = "// ff-builder: menu ordering"
+BOOT_DIAG_MARKER = "// ff-builder: boot-time crash diagnostics"
 
 INJECTED_FLAGS = """-DHELTEC_T114
   {marker}
@@ -421,8 +423,75 @@ def patch_menu_ordering():
     print(f"Patched {MENU_HANDLER_CPP}: Friend Finder + Track a Friend hoisted to top")
 
 
+# --- Boot-time crash diagnostics (issue #32 investigation) ----------------
+#
+# Upstream nrf52Setup() reads NRF_POWER->RESETREAS but only logs the raw hex
+# value at LOG_DEBUG — invisible at production log levels — and never clears
+# the register. RESETREAS is write-1-to-clear; if not cleared, each successive
+# reset ORs its bit into the existing value, so production logs over time
+# become uninterpretable.
+#
+# This patch expands the single LOG_DEBUG into a block that: (1) logs at
+# LOG_INFO so the line appears in production, (2) decodes each set bit into
+# a human-readable line using POWER_RESETREAS_*_Msk, (3) names the zero case
+# explicitly ("POWER-ON or BROWN-OUT" — the nRF52840 cannot distinguish them),
+# (4) emits the configured POFCON brown-out threshold so any future reader
+# of a boot log sees the BOD setup without grepping source, and (5) clears
+# RESETREAS so the next boot reflects only fresh causes.
+#
+# Pure diagnostic — no behavior change. patch-native.py is intentionally
+# unchanged: main-nrf52.cpp is not in the native build tree.
+#
+# See openspec/changes/boot-crash-diagnostics/{proposal,design}.md.
+
+BOOT_DIAG_OLD = '''    uint32_t why = NRF_POWER->RESETREAS;
+    // per
+    // https://infocenter.nordicsemi.com/index.jsp?topic=%2Fcom.nordic.infocenter.nrf52832.ps.v1.1%2Fpower.html
+    LOG_DEBUG("Reset reason: 0x%x", why);'''
+
+BOOT_DIAG_NEW = '''    uint32_t why = NRF_POWER->RESETREAS;
+    ''' + BOOT_DIAG_MARKER + ''' (issue #32 investigation)
+    // per https://infocenter.nordicsemi.com/index.jsp?topic=%2Fcom.nordic.infocenter.nrf52832.ps.v1.1%2Fpower.html
+    LOG_INFO("Reset reason: 0x%08x", (unsigned)why);
+    if (why == 0) {
+        LOG_INFO("  -> POWER-ON or BROWN-OUT (no bits set; RESETREAS clears on power-loss)");
+    }
+    if (why & POWER_RESETREAS_RESETPIN_Msk) LOG_INFO("  -> RESETPIN (physical reset pin asserted)");
+    if (why & POWER_RESETREAS_DOG_Msk)      LOG_INFO("  -> DOG (watchdog timeout)");
+    if (why & POWER_RESETREAS_SREQ_Msk)     LOG_INFO("  -> SREQ (software NVIC_SystemReset)");
+    if (why & POWER_RESETREAS_LOCKUP_Msk)   LOG_INFO("  -> LOCKUP (CPU lockup / hard fault escalation)");
+    if (why & POWER_RESETREAS_OFF_Msk)      LOG_INFO("  -> OFF (wake from SystemOFF via GPIO)");
+    if (why & POWER_RESETREAS_LPCOMP_Msk)   LOG_INFO("  -> LPCOMP (wake from SystemOFF via LPCOMP)");
+    if (why & POWER_RESETREAS_DIF_Msk)      LOG_INFO("  -> DIF (debug interface mode entered)");
+    if (why & POWER_RESETREAS_NFC_Msk)      LOG_INFO("  -> NFC (wake from SystemOFF via NFC field)");
+    LOG_INFO("Brown-out detector: configured later in initBrownout() to POWER_POFCON_THRESHOLD_V24 (~2.4V)");
+    NRF_POWER->RESETREAS = 0xFFFFFFFFu; // write-1-to-clear; next boot reflects fresh causes only'''
+
+
+def patch_boot_crash_diagnostics():
+    try:
+        with open(MAIN_NRF52_CPP) as f:
+            content = f.read()
+    except FileNotFoundError:
+        sys.exit(f"ERROR: {MAIN_NRF52_CPP} not found. Run from firmware source root.")
+
+    if BOOT_DIAG_MARKER in content:
+        print(f"Skipped {MAIN_NRF52_CPP}: boot crash diagnostics already patched")
+        return
+
+    if BOOT_DIAG_OLD not in content:
+        sys.exit(f"ERROR: expected 'Reset reason: 0x%x' LOG_DEBUG block in {MAIN_NRF52_CPP} not found")
+
+    content = content.replace(BOOT_DIAG_OLD, BOOT_DIAG_NEW, 1)
+
+    with open(MAIN_NRF52_CPP, "w") as f:
+        f.write(content)
+    print(f"Patched {MAIN_NRF52_CPP}: RESETREAS decode + LOG_INFO + clear + POFCON threshold log")
+
+
 if __name__ == "__main__":
     patch_variant_ini()
     patch_friend_finder_include()
     patch_friend_finder_persistence()
     patch_menu_ordering()
+    patch_boot_crash_diagnostics()
