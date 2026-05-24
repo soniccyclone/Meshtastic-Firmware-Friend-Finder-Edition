@@ -2060,6 +2060,50 @@ def patch_trim_friend_finder_menu():
     print(f"Patched {MENU_HANDLER_CPP}: trimmed friendFinderBaseMenu (-Track a Friend, -Dev Tools)")
 
 
+# --- "Captain Compass" rename (ff-1d2) ------------------------------------
+#
+# User-facing relabel of the Friend Finder feature in the menu UI. Only
+# the three quoted strings that the user actually reads are changed:
+# the home-menu entry, the favorites-menu "Track" entry, and the banner
+# title. Internal C++ identifiers (FriendFinderModule, friendFinderModule,
+# friendFinderBaseMenu, file paths, comments) are untouched — they're
+# code, not UX.
+#
+# Runs LAST in __main__ so the home-menu and favorites-menu strings are
+# already in the post-patch positions established by patch_menu_ordering
+# and patch_compass_redesign. The bannerOptions.message anchor is also
+# unaffected by patch_trim_friend_finder_menu (which only touches the
+# push_back block and selected==N callback).
+
+CAPTAIN_RENAMES = [
+    ('    optionsArray[options] = "Friend Finder";',
+     '    optionsArray[options] = "Compass";'),
+    ('    optionsArray[options] = "Track (Friend Finder)";',
+     '    optionsArray[options] = "Track";'),
+    ('    bannerOptions.message = "Friend Finder";',
+     '    bannerOptions.message = "Compass";'),
+]
+
+
+def patch_captain_compass_rename():
+    path = MENU_HANDLER_CPP
+    src = open(path).read()
+    if '"Captain Compass"' in src:
+        print(f"Skipped {path}: Captain Compass rename already applied")
+        return
+    missing = [old for old, _ in CAPTAIN_RENAMES if old not in src]
+    if missing:
+        sys.exit(
+            f"ERROR: captain_compass rename anchor(s) not found in {path}:\n  "
+            + "\n  ".join(missing)
+        )
+    for old, new in CAPTAIN_RENAMES:
+        src = src.replace(old, new, 1)
+    with open(path, "w") as f:
+        f.write(src)
+    print(f"Patched {path}: 'Friend Finder' -> 'Captain Compass' ({len(CAPTAIN_RENAMES)} labels)")
+
+
 if __name__ == "__main__":
     patch_variant_ini()
     patch_friend_finder_include()
@@ -2069,3 +2113,4 @@ if __name__ == "__main__":
     patch_wire_nrf52_timeouts()
     patch_qmc_resilience()
     patch_trim_friend_finder_menu()
+    patch_captain_compass_rename()
