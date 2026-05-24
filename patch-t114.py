@@ -2104,6 +2104,417 @@ def patch_captain_compass_rename():
     print(f"Patched {path}: 'Friend Finder' -> 'Captain Compass' ({len(CAPTAIN_RENAMES)} labels)")
 
 
+# --- Saved Places persistence (gh #48, ff-c5k) ----------------------------
+#
+# Sister to patch_friend_finder_persistence. Upstream loadPlaces()/savePlaces()
+# are gated behind FF_HAVE_NVS (= ESP32 Preferences only), so on T114/nRF52
+# the SavedPlace[8] array dies on every reboot. Replace both bodies with
+# LittleFS-backed implementations using SafeFile (atomic temp-file-plus-
+# rename, same primitive saveProto uses).
+#
+# File: /prefs/places.proto. Sparse: only used entries persisted, each
+# carries its slot index so unused slots stay empty on reload.
+# Worst case: 12 + 36*8 = 300 bytes — fits two copies on LittleFS.
+#
+# Composes with patch_friend_finder_persistence which already pulls in
+# FSCommon.h and SafeFile.h (same translation unit).
+
+PLACES_PERSIST_LOAD_OLD = """void FriendFinderModule::loadPlaces() {
+    for (auto &p : places_) p = {};
+#if FF_HAVE_NVS
+    if (!g_prefs.begin("ffinder", true)) return;
+    size_t sz = g_prefs.getBytesLength("places");
+    if (sz == sizeof(places_)) {
+        g_prefs.getBytes("places", places_, sizeof(places_));
+        LOG_INFO("[FriendFinder] Loaded %u bytes of saved places", (unsigned)sz);
+    }
+    g_prefs.end();
+#endif
+}"""
+
+PLACES_PERSIST_LOAD_NEW = """// ff-builder (gh #48): persist Saved Places to /prefs/places.proto via SafeFile.
+namespace {
+struct PersistedPlacesHeader {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t entry_size;
+    uint8_t  count;
+    uint8_t  reserved[3];
+};
+struct PersistedPlace {
+    uint8_t  slot;
+    char     name[24];
+    int32_t  latitude_i;
+    int32_t  longitude_i;
+};
+static_assert(sizeof(PersistedPlacesHeader) == 12, "places header size drift");
+static_assert(sizeof(PersistedPlace) == 36, "places entry size drift");
+
+constexpr uint32_t PLACES_PERSIST_MAGIC   = 0x4646504Cu; // 'FFPL'
+constexpr uint16_t PLACES_PERSIST_VERSION = 1;
+constexpr const char *PLACES_PERSIST_FILE = "/prefs/places.proto";
+} // namespace
+
+void FriendFinderModule::loadPlaces() {
+    for (auto &p : places_) p = {};
+#ifdef FSCom
+    auto file = FSCom.open(PLACES_PERSIST_FILE, FILE_O_READ);
+    if (!file) {
+        LOG_INFO("[FriendFinder] No persisted places (%s missing)", PLACES_PERSIST_FILE);
+        return;
+    }
+    PersistedPlacesHeader hdr{};
+    if (file.read(reinterpret_cast<uint8_t *>(&hdr), sizeof(hdr)) != sizeof(hdr)) {
+        LOG_WARN("[FriendFinder] places file truncated header; ignoring");
+        file.close();
+        return;
+    }
+    if (hdr.magic != PLACES_PERSIST_MAGIC) {
+        LOG_WARN("[FriendFinder] places file bad magic 0x%08x; ignoring", (unsigned)hdr.magic);
+        file.close();
+        return;
+    }
+    if (hdr.version != PLACES_PERSIST_VERSION || hdr.entry_size != sizeof(PersistedPlace)) {
+        LOG_WARN("[FriendFinder] places file version/entry_size mismatch (v=%u sz=%u); booting empty",
+                 (unsigned)hdr.version, (unsigned)hdr.entry_size);
+        file.close();
+        return;
+    }
+    int loaded = 0;
+    for (uint8_t i = 0; i < hdr.count; ++i) {
+        PersistedPlace pp{};
+        if (file.read(reinterpret_cast<uint8_t *>(&pp), sizeof(pp)) != sizeof(pp)) {
+            LOG_WARN("[FriendFinder] places file truncated at entry %u", (unsigned)i);
+            break;
+        }
+        if (pp.slot >= MAX_PLACES) {
+            LOG_WARN("[FriendFinder] places entry slot %u out of range; skipping", (unsigned)pp.slot);
+            continue;
+        }
+        places_[pp.slot].used = true;
+        memcpy(places_[pp.slot].name, pp.name, sizeof(places_[pp.slot].name));
+        places_[pp.slot].name[sizeof(places_[pp.slot].name) - 1] = '\\0';
+        places_[pp.slot].latitude_i  = pp.latitude_i;
+        places_[pp.slot].longitude_i = pp.longitude_i;
+        ++loaded;
+    }
+    file.close();
+    LOG_INFO("[FriendFinder] Loaded %d places from %s", loaded, PLACES_PERSIST_FILE);
+#else
+    LOG_WARN("[FriendFinder] No filesystem; places in RAM only");
+#endif
+}"""
+
+PLACES_PERSIST_SAVE_OLD = """void FriendFinderModule::savePlaces() {
+#if FF_HAVE_NVS
+    if (!g_prefs.begin("ffinder", false)) return;
+    g_prefs.putBytes("places", places_, sizeof(places_));
+    g_prefs.end();
+#endif
+}"""
+
+PLACES_PERSIST_SAVE_NEW = """void FriendFinderModule::savePlaces() {
+#ifdef FSCom
+    {
+        concurrency::LockGuard g(spiLock);
+        FSCom.mkdir("/prefs");
+    }
+    PersistedPlacesHeader hdr{};
+    hdr.magic      = PLACES_PERSIST_MAGIC;
+    hdr.version    = PLACES_PERSIST_VERSION;
+    hdr.entry_size = sizeof(PersistedPlace);
+    hdr.count      = 0;
+    for (const auto &p : places_) if (p.used) ++hdr.count;
+
+    SafeFile sf(PLACES_PERSIST_FILE, /*fullAtomic=*/true);
+    sf.write(reinterpret_cast<const uint8_t *>(&hdr), sizeof(hdr));
+    for (uint8_t i = 0; i < MAX_PLACES; ++i) {
+        if (!places_[i].used) continue;
+        PersistedPlace pp{};
+        pp.slot = i;
+        memcpy(pp.name, places_[i].name, sizeof(pp.name));
+        pp.latitude_i  = places_[i].latitude_i;
+        pp.longitude_i = places_[i].longitude_i;
+        sf.write(reinterpret_cast<const uint8_t *>(&pp), sizeof(pp));
+    }
+    if (!sf.close()) {
+        LOG_ERROR("[FriendFinder] Failed to persist places to %s", PLACES_PERSIST_FILE);
+    } else {
+        LOG_INFO("[FriendFinder] Persisted %u places to %s", (unsigned)hdr.count, PLACES_PERSIST_FILE);
+    }
+#endif
+}"""
+
+PLACES_PERSIST_MARKER = "// ff-builder (gh #48): persist Saved Places to /prefs/places.proto"
+
+
+def patch_friend_finder_places_persistence():
+    with open(FRIEND_FINDER_CPP) as f:
+        content = f.read()
+    if PLACES_PERSIST_MARKER in content:
+        print(f"Skipped {FRIEND_FINDER_CPP}: places persistence already patched")
+        return
+    if PLACES_PERSIST_LOAD_OLD not in content:
+        sys.exit(f"ERROR: places loadPlaces() anchor not found in {FRIEND_FINDER_CPP}")
+    if PLACES_PERSIST_SAVE_OLD not in content:
+        sys.exit(f"ERROR: places savePlaces() anchor not found in {FRIEND_FINDER_CPP}")
+
+    content = content.replace(PLACES_PERSIST_LOAD_OLD, PLACES_PERSIST_LOAD_NEW, 1)
+    content = content.replace(PLACES_PERSIST_SAVE_OLD, PLACES_PERSIST_SAVE_NEW, 1)
+    with open(FRIEND_FINDER_CPP, "w") as f:
+        f.write(content)
+    print(f"Patched {FRIEND_FINDER_CPP}: Saved Places -> /prefs/places.proto")
+
+
+# --- Magnetometer calibration persistence (gh #48, ff-c5k) ----------------
+#
+# Upstream loadPrefs() / saveCalPrefs / saveNorthPrefs / saveSoftIronPrefs /
+# saveFlipNorthPrefs are gated behind MAGMOD_HAVE_NVS (= ESP32 Preferences
+# only). On T114 every reboot wipes the figure-8/flat-spin calibration,
+# user "north here" offset, axis flip, and flip-north flag.
+#
+# Replace all five with LittleFS-backed implementations sharing one file at
+# /prefs/magcal.proto. All four save* methods write the full file (~64 B);
+# the granular split made sense for NVS key/value but for a single SafeFile
+# write the simplification is worth the few extra flash bytes per save.
+#
+# Adds #include "FSCommon.h" + "SafeFile.h" near the top of the .cpp and a
+# small anonymous namespace block with the persisted struct + constants
+# immediately above loadPrefs().
+
+MAGCAL_INCLUDES_OLD = '#include "MagnetometerModule.h"\n#include <math.h>\n'
+MAGCAL_INCLUDES_NEW = (
+    '#include "MagnetometerModule.h"\n'
+    '#include <math.h>\n'
+    '\n'
+    '// ff-builder (gh #48): persist calibration to LittleFS\n'
+    '#include "FSCommon.h"\n'
+    '#include "SafeFile.h"\n'
+)
+
+MAGCAL_LOAD_OLD = """void MagnetometerModule::loadPrefs() {
+#if MAGMOD_HAVE_NVS
+    if (!prefs.begin("magmod", /*rw=*/true)) {
+        LOG_INFO("[Magnetometer] NVS open failed; using defaults.");
+        return;
+    }
+    biasX = prefs.getFloat("bx", 0.0f);
+    biasY = prefs.getFloat("by", 0.0f);
+    biasZ = prefs.getFloat("bz", 0.0f);
+    scaleX = prefs.getFloat("sx", 1.0f);
+    scaleY = prefs.getFloat("sy", 1.0f);
+    scaleZ = prefs.getFloat("sz", 1.0f);
+    userZeroDeg = prefs.getFloat("north", 0.0f);
+
+    // 2D soft-iron
+    siValid = prefs.getBool("si_ok", false);
+    flipYafterCal = prefs.getBool("flip_y", false);
+    flipNorth = prefs.getBool("flip_n", false); // Add this line
+    siBx    = prefs.getFloat("si_bx", 0.0f);
+    siBy    = prefs.getFloat("si_by", 0.0f);
+    siSxx   = prefs.getFloat("si_sxx", 1.0f);
+    siSxy   = prefs.getFloat("si_sxy", 0.0f);
+    siSyx   = prefs.getFloat("si_syx", 0.0f);
+    siSyy   = prefs.getFloat("si_syy", 1.0f);
+
+    prefs.end();
+
+    LOG_INFO("[Magnetometer] Loaded cal Bias(%.2f, %.2f, %.2f) Scale(%.3f, %.3f, %.3f) North=%.2f",
+             biasX, biasY, biasZ, scaleX, scaleY, scaleZ, userZeroDeg);
+    if (siValid) {
+        LOG_INFO("[Magnetometer] Loaded 2D soft-iron: bx=%.2f by=%.2f S=[[%.5f %.5f][%.5f %.5f]] flipY=%d",
+                 siBx, siBy, siSxx, siSxy, siSyx, siSyy, (int)flipYafterCal);
+    }
+#endif
+}"""
+
+MAGCAL_LOAD_NEW = """// ff-builder (gh #48): persist magnetometer calibration to /prefs/magcal.proto.
+namespace {
+struct PersistedMagCal {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t size;
+    float    biasX, biasY, biasZ;
+    float    scaleX, scaleY, scaleZ;
+    float    userZeroDeg;
+    uint8_t  siValid;
+    uint8_t  flipYafterCal;
+    uint8_t  flipNorth;
+    uint8_t  reserved;
+    float    siBx, siBy;
+    float    siSxx, siSxy, siSyx, siSyy;
+};
+constexpr uint32_t MAGCAL_PERSIST_MAGIC   = 0x4D47434Cu; // 'MGCL'
+constexpr uint16_t MAGCAL_PERSIST_VERSION = 1;
+constexpr const char *MAGCAL_PERSIST_FILE = "/prefs/magcal.proto";
+} // namespace
+
+void MagnetometerModule::loadPrefs() {
+#ifdef FSCom
+    auto file = FSCom.open(MAGCAL_PERSIST_FILE, FILE_O_READ);
+    if (!file) {
+        LOG_INFO("[Magnetometer] No persisted cal (%s missing); using defaults", MAGCAL_PERSIST_FILE);
+        return;
+    }
+    PersistedMagCal pmc{};
+    if (file.read(reinterpret_cast<uint8_t *>(&pmc), sizeof(pmc)) != sizeof(pmc)) {
+        LOG_WARN("[Magnetometer] cal file truncated; using defaults");
+        file.close();
+        return;
+    }
+    file.close();
+    if (pmc.magic != MAGCAL_PERSIST_MAGIC) {
+        LOG_WARN("[Magnetometer] cal file bad magic 0x%08x; using defaults", (unsigned)pmc.magic);
+        return;
+    }
+    if (pmc.version != MAGCAL_PERSIST_VERSION || pmc.size != sizeof(pmc)) {
+        LOG_WARN("[Magnetometer] cal file version/size mismatch (v=%u sz=%u); using defaults",
+                 (unsigned)pmc.version, (unsigned)pmc.size);
+        return;
+    }
+    biasX = pmc.biasX; biasY = pmc.biasY; biasZ = pmc.biasZ;
+    scaleX = pmc.scaleX; scaleY = pmc.scaleY; scaleZ = pmc.scaleZ;
+    userZeroDeg = pmc.userZeroDeg;
+    siValid       = pmc.siValid != 0;
+    flipYafterCal = pmc.flipYafterCal != 0;
+    flipNorth     = pmc.flipNorth != 0;
+    siBx = pmc.siBx; siBy = pmc.siBy;
+    siSxx = pmc.siSxx; siSxy = pmc.siSxy; siSyx = pmc.siSyx; siSyy = pmc.siSyy;
+    LOG_INFO("[Magnetometer] Loaded cal Bias(%.2f, %.2f, %.2f) Scale(%.3f, %.3f, %.3f) North=%.2f",
+             biasX, biasY, biasZ, scaleX, scaleY, scaleZ, userZeroDeg);
+    if (siValid) {
+        LOG_INFO("[Magnetometer] Loaded 2D soft-iron: bx=%.2f by=%.2f S=[[%.5f %.5f][%.5f %.5f]] flipY=%d",
+                 siBx, siBy, siSxx, siSxy, siSyx, siSyy, (int)flipYafterCal);
+    }
+#endif
+}"""
+
+MAGCAL_SAVE_CAL_OLD = """void MagnetometerModule::saveCalPrefs() {
+#if MAGMOD_HAVE_NVS
+    if (!prefs.begin("magmod", /*rw=*/false)) return;
+    prefs.putFloat("bx", biasX);
+    prefs.putFloat("by", biasY);
+    prefs.putFloat("bz", biasZ);
+    prefs.putFloat("sx", scaleX);
+    prefs.putFloat("sy", scaleY);
+    prefs.putFloat("sz", scaleZ);
+    prefs.end();
+#endif
+}"""
+
+MAGCAL_SAVE_CAL_NEW = """void MagnetometerModule::saveCalPrefs() {
+    // ff-builder (gh #48): unified write — all save* methods route through here.
+    // Each call writes the full cal file (~64 B); the per-field split made
+    // sense for NVS but for a SafeFile atomic write it's not worth the
+    // extra surface area.
+#ifdef FSCom
+    {
+        concurrency::LockGuard g(spiLock);
+        FSCom.mkdir("/prefs");
+    }
+    PersistedMagCal pmc{};
+    pmc.magic   = MAGCAL_PERSIST_MAGIC;
+    pmc.version = MAGCAL_PERSIST_VERSION;
+    pmc.size    = sizeof(pmc);
+    pmc.biasX = biasX; pmc.biasY = biasY; pmc.biasZ = biasZ;
+    pmc.scaleX = scaleX; pmc.scaleY = scaleY; pmc.scaleZ = scaleZ;
+    pmc.userZeroDeg   = userZeroDeg;
+    pmc.siValid       = siValid ? 1 : 0;
+    pmc.flipYafterCal = flipYafterCal ? 1 : 0;
+    pmc.flipNorth     = flipNorth ? 1 : 0;
+    pmc.siBx = siBx; pmc.siBy = siBy;
+    pmc.siSxx = siSxx; pmc.siSxy = siSxy; pmc.siSyx = siSyx; pmc.siSyy = siSyy;
+
+    SafeFile sf(MAGCAL_PERSIST_FILE, /*fullAtomic=*/true);
+    sf.write(reinterpret_cast<const uint8_t *>(&pmc), sizeof(pmc));
+    if (!sf.close()) {
+        LOG_ERROR("[Magnetometer] Failed to persist cal to %s", MAGCAL_PERSIST_FILE);
+    } else {
+        LOG_INFO("[Magnetometer] Persisted cal to %s", MAGCAL_PERSIST_FILE);
+    }
+#endif
+}"""
+
+MAGCAL_SAVE_NORTH_OLD = """void MagnetometerModule::saveNorthPrefs() {
+#if MAGMOD_HAVE_NVS
+    if (!prefs.begin("magmod", /*rw=*/false)) return;
+    prefs.putFloat("north", userZeroDeg);
+    prefs.end();
+#endif
+}"""
+
+MAGCAL_SAVE_NORTH_NEW = """void MagnetometerModule::saveNorthPrefs() {
+    // ff-builder (gh #48): unified — delegate to saveCalPrefs (writes full file).
+    saveCalPrefs();
+}"""
+
+MAGCAL_SAVE_SI_OLD = """void MagnetometerModule::saveSoftIronPrefs() {
+#if MAGMOD_HAVE_NVS
+    if (!prefs.begin("magmod", /*rw=*/false)) return;
+    prefs.putBool ("si_ok", siValid);
+    prefs.putBool ("flip_y", flipYafterCal);
+    prefs.putFloat("si_bx", siBx);
+    prefs.putFloat("si_by", siBy);
+    prefs.putFloat("si_sxx", siSxx);
+    prefs.putFloat("si_sxy", siSxy);
+    prefs.putFloat("si_syx", siSyx);
+    prefs.putFloat("si_syy", siSyy);
+    prefs.end();
+#endif
+}"""
+
+MAGCAL_SAVE_SI_NEW = """void MagnetometerModule::saveSoftIronPrefs() {
+    // ff-builder (gh #48): unified — delegate to saveCalPrefs (writes full file).
+    saveCalPrefs();
+}"""
+
+MAGCAL_SAVE_FLIPN_OLD = """void MagnetometerModule::saveFlipNorthPrefs() {
+#if MAGMOD_HAVE_NVS
+    if (!prefs.begin("magmod", /*rw=*/false)) return;
+    prefs.putBool("flip_n", flipNorth);
+    prefs.end();
+#endif
+}"""
+
+MAGCAL_SAVE_FLIPN_NEW = """void MagnetometerModule::saveFlipNorthPrefs() {
+    // ff-builder (gh #48): unified — delegate to saveCalPrefs (writes full file).
+    saveCalPrefs();
+}"""
+
+MAGCAL_PERSIST_MARKER = "// ff-builder (gh #48): persist magnetometer calibration"
+
+
+def patch_magnetometer_cal_persistence():
+    with open(MAG_MODULE_CPP) as f:
+        content = f.read()
+    if MAGCAL_PERSIST_MARKER in content:
+        print(f"Skipped {MAG_MODULE_CPP}: magcal persistence already patched")
+        return
+
+    checks = [
+        (MAGCAL_INCLUDES_OLD,    "top-of-file includes"),
+        (MAGCAL_LOAD_OLD,        "loadPrefs() body"),
+        (MAGCAL_SAVE_CAL_OLD,    "saveCalPrefs() body"),
+        (MAGCAL_SAVE_NORTH_OLD,  "saveNorthPrefs() body"),
+        (MAGCAL_SAVE_SI_OLD,     "saveSoftIronPrefs() body"),
+        (MAGCAL_SAVE_FLIPN_OLD,  "saveFlipNorthPrefs() body"),
+    ]
+    for old, label in checks:
+        if old not in content:
+            sys.exit(f"ERROR: magcal anchor not found ({label}) in {MAG_MODULE_CPP}")
+
+    content = content.replace(MAGCAL_INCLUDES_OLD,    MAGCAL_INCLUDES_NEW,    1)
+    content = content.replace(MAGCAL_LOAD_OLD,        MAGCAL_LOAD_NEW,        1)
+    content = content.replace(MAGCAL_SAVE_CAL_OLD,    MAGCAL_SAVE_CAL_NEW,    1)
+    content = content.replace(MAGCAL_SAVE_NORTH_OLD,  MAGCAL_SAVE_NORTH_NEW,  1)
+    content = content.replace(MAGCAL_SAVE_SI_OLD,     MAGCAL_SAVE_SI_NEW,     1)
+    content = content.replace(MAGCAL_SAVE_FLIPN_OLD,  MAGCAL_SAVE_FLIPN_NEW,  1)
+
+    with open(MAG_MODULE_CPP, "w") as f:
+        f.write(content)
+    print(f"Patched {MAG_MODULE_CPP}: magnetometer cal -> /prefs/magcal.proto")
+
+
 if __name__ == "__main__":
     patch_variant_ini()
     patch_friend_finder_include()
@@ -2114,3 +2525,5 @@ if __name__ == "__main__":
     patch_qmc_resilience()
     patch_trim_friend_finder_menu()
     patch_captain_compass_rename()
+    patch_friend_finder_places_persistence()
+    patch_magnetometer_cal_persistence()
