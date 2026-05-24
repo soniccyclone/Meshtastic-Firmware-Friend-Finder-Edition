@@ -2077,11 +2077,11 @@ def patch_trim_friend_finder_menu():
 
 CAPTAIN_RENAMES = [
     ('    optionsArray[options] = "Friend Finder";',
-     '    optionsArray[options] = "Captain Compass";'),
+     '    optionsArray[options] = "Compass";'),
     ('    optionsArray[options] = "Track (Friend Finder)";',
-     '    optionsArray[options] = "Track (Captain Compass)";'),
+     '    optionsArray[options] = "Track";'),
     ('    bannerOptions.message = "Friend Finder";',
-     '    bannerOptions.message = "Captain Compass";'),
+     '    bannerOptions.message = "Compass";'),
 ]
 
 
