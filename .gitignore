@@ -10,5 +10,9 @@ firmware/heltec_t114/firmware.uf2
 # Local smoke-test runs (logs from `podman run --entrypoint entrypoint-smoke.sh`).
 smoke-output/
 
+# Python bytecode.
+__pycache__/
+*.pyc
+
 # Claude Code ephemeral runtime state.
 .claude/scheduled_tasks.lock
