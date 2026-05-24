@@ -38,6 +38,8 @@ import sys
 VARIANT_INI = "variants/nrf52840/heltec_mesh_node_t114/platformio.ini"
 FRIEND_FINDER_CPP = "src/modules/FriendFinderModule.cpp"
 MENU_HANDLER_CPP = "src/graphics/draw/MenuHandler.cpp"
+MAG_MODULE_CPP = "src/modules/MagnetometerModule.cpp"
+MAG_MODULE_H   = "src/modules/MagnetometerModule.h"
 MARKER = "# ff-builder patches"
 PERSIST_MARKER = "// ff-builder: persist friends to LittleFS"
 MENU_ORDERING_MARKER = "// ff-builder: menu ordering"
@@ -1483,9 +1485,71 @@ def patch_compass_redesign():
         print(f"Patched {MENU_HANDLER_CPP}: compass redesign ({len(checks)} patches)")
 
 
+MAG_H_OLD = (
+    "// Logging cadence\n"
+    "    uint32_t lastLogMs = 0;\n"
+)
+MAG_H_NEW = (
+    "// Logging cadence\n"
+    "    uint32_t lastLogMs = 0;\n"
+    "    uint8_t  qmcFailCount = 0;  // ff-builder: consecutive read-failure counter for bus reset\n"
+)
+
+MAG_READ_OLD = (
+    "// Read MAG (bus-agnostic)\n"
+    "    int16_t rx, ry, rz;\n"
+    "    if (!qmcReadRaw(*magBus, magAddr, rx, ry, rz)) {\n"
+    "        LOG_INFO(\"[Magnetometer] QMC read failed; will retry.\");\n"
+    "        return 100;\n"
+    "    }\n"
+)
+MAG_READ_NEW = """\
+// Read MAG (bus-agnostic)
+    int16_t rx, ry, rz;
+    if (!qmcReadRaw(*magBus, magAddr, rx, ry, rz)) {
+        qmcFailCount++;
+        LOG_INFO("[Magnetometer] QMC read failed (streak %d).", (int)qmcFailCount);
+        if (qmcFailCount >= 3) {
+            LOG_INFO("[Magnetometer] Resetting I2C bus after %d consecutive failures.", (int)qmcFailCount);
+            magBus->end();
+            magBus->begin();
+            qmcInit(*magBus, magAddr);
+            qmcFailCount = 0;
+        }
+        return 100;
+    }
+    qmcFailCount = 0;
+"""
+
+
+def patch_mag_i2c_timeout():
+    checks = [
+        (MAG_MODULE_H,   MAG_H_OLD),
+        (MAG_MODULE_CPP, MAG_READ_OLD),
+    ]
+    for path, old in checks:
+        src = open(path).read()
+        if old not in src:
+            print(f"ERROR: mag_i2c_timeout OLD string not found in {path}", file=sys.stderr)
+            sys.exit(1)
+
+    h = open(MAG_MODULE_H).read()
+    h = h.replace(MAG_H_OLD, MAG_H_NEW, 1)
+    with open(MAG_MODULE_H, "w") as f:
+        f.write(h)
+
+    cpp = open(MAG_MODULE_CPP).read()
+    cpp = cpp.replace(MAG_READ_OLD, MAG_READ_NEW, 1)
+    with open(MAG_MODULE_CPP, "w") as f:
+        f.write(cpp)
+
+    print(f"Patched {MAG_MODULE_H} + {MAG_MODULE_CPP}: mag I2C timeout/bus-reset recovery")
+
+
 if __name__ == "__main__":
     patch_variant_ini()
     patch_friend_finder_include()
     patch_friend_finder_persistence()
     patch_menu_ordering()
     patch_compass_redesign()
+    patch_mag_i2c_timeout()
