@@ -1971,6 +1971,95 @@ def patch_qmc_resilience():
           f"(ODR 200->50Hz, polling 50->250ms, safety-net recovery)")
 
 
+# --- Trim friendFinderBaseMenu (ff-iic) -----------------------------------
+#
+# Remove "Track a Friend" and "Dev Tools" from the Captain Compass menu.
+# After this patch the menu is: Back / Saved Places / Compass Cal.
+#
+# The push_back list and the selected==N callback dispatch must stay in
+# lockstep, so both are anchored as a single block each. OLD anchors
+# match the state AFTER patch_menu_ordering + patch_compass_redesign
+# have run — this patch goes LAST.
+#
+# Underlying handlers (friend_finder_list_menu, friend_finder_dev_tools_menu)
+# are left in place: friend_finder_list_menu is still reachable from the
+# favorites long-press "Track" entry, and dev tools is dead code we can
+# excise in a separate sweep if/when wanted.
+
+TRIM_PUSHBACK_OLD = """    options.push_back("Back");
+    options.push_back("Track a Friend");
+    options.push_back("Saved Places");
+    options.push_back("Compass Cal");
+    options.push_back("Dev Tools");
+"""
+
+TRIM_PUSHBACK_NEW = """    options.push_back("Back");
+    options.push_back("Saved Places");
+    options.push_back("Compass Cal");
+"""
+
+TRIM_CALLBACK_OLD = """        if (selected == 0) { // Back
+            if (friendFinderModule) friendFinderModule->setState(FriendFinderState::IDLE);
+        } else if (selected == 1) { // Track a Friend
+            if (friendFinderModule) {
+                if (!friendFinderModule->spoofModeEnabled && friendFinderModule->getUsedFriendsCount() == 0) {
+                    screen->showSimpleBanner("No friends saved", 1200);
+                } else {
+                    menuQueue = friend_finder_list_menu;
+                    screen->runNow();
+                }
+            }
+        } else if (selected == 2) { // Saved Places
+            menuQueue = friend_finder_places_menu;
+            screen->runNow();
+        } else if (selected == 3) { // Compass Cal
+            if (friendFinderModule) friendFinderModule->setState(FriendFinderState::COMPASS_SCREEN);
+        } else if (selected == 4) { // Dev Tools
+            menuQueue = friend_finder_dev_tools_menu;
+            screen->runNow();
+        }
+"""
+
+TRIM_CALLBACK_NEW = """        if (selected == 0) { // Back
+            if (friendFinderModule) friendFinderModule->setState(FriendFinderState::IDLE);
+        } else if (selected == 1) { // Saved Places
+            menuQueue = friend_finder_places_menu;
+            screen->runNow();
+        } else if (selected == 2) { // Compass Cal
+            if (friendFinderModule) friendFinderModule->setState(FriendFinderState::COMPASS_SCREEN);
+        }
+"""
+
+TRIM_MARKER = "// ff-builder: trimmed friendFinderBaseMenu"
+
+
+def patch_trim_friend_finder_menu():
+    src = open(MENU_HANDLER_CPP).read()
+    if TRIM_MARKER in src:
+        print(f"Skipped {MENU_HANDLER_CPP}: trim already applied")
+        return
+    missing = []
+    if TRIM_PUSHBACK_OLD not in src:
+        missing.append("push_back block")
+    if TRIM_CALLBACK_OLD not in src:
+        missing.append("callback block")
+    if missing:
+        sys.exit(
+            f"ERROR: trim_friend_finder_menu anchor(s) not found in {MENU_HANDLER_CPP}: "
+            + ", ".join(missing)
+        )
+
+    src = src.replace(
+        TRIM_PUSHBACK_OLD,
+        "    " + TRIM_MARKER + ": Track a Friend + Dev Tools removed\n" + TRIM_PUSHBACK_NEW,
+        1,
+    )
+    src = src.replace(TRIM_CALLBACK_OLD, TRIM_CALLBACK_NEW, 1)
+    with open(MENU_HANDLER_CPP, "w") as f:
+        f.write(src)
+    print(f"Patched {MENU_HANDLER_CPP}: trimmed friendFinderBaseMenu (-Track a Friend, -Dev Tools)")
+
+
 if __name__ == "__main__":
     patch_variant_ini()
     patch_friend_finder_include()
@@ -1979,3 +2068,4 @@ if __name__ == "__main__":
     patch_compass_redesign()
     patch_wire_nrf52_timeouts()
     patch_qmc_resilience()
+    patch_trim_friend_finder_menu()
