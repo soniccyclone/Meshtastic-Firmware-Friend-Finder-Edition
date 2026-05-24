@@ -6,8 +6,9 @@ This repo is a fork of `meshtastic/firmware`. It adds Friend Finder functionalit
 Heltec Mesh Node T114 (nRF52840 + SX1262). The previous implementation (`soniccyclone/Meshtastic-Firmware-Friend-Finder-Edition`) was a Python script that patched a LeapYeet firmware clone at build time — that approach is dead. This is the clean replacement: real C++ checked into a real fork.
 
 **Reference repos (read-only, never pull from automatically):**
-- `https://github.com/meshtastic/firmware` — upstream, merge deliberately on releases we care about
-- `https://github.com/LeapYeet/firmware` at `f49f9b7967311a08c7bf1c1af6e8f28671182cd1` — T114 board support reference and source of our existing module code
+- https://github.com/meshtastic/firmware — upstream, NEVER merge
+- https://github.com/LeapYeet/firmware/tree/f49f9b7967311a08c7bf1c1af6e8f28671182cd1 — T114 board support reference and source of our existing module code (pinned SHA)
+- https://github.com/meshtastic/Adafruit_nRF52_Arduino/tree/e13f5820002a4fb2a5e6754b42ace185277e5adf — the nRF52 Arduino framework package at the SHA LeapYeet pinned; Wire_nRF52.cpp lives here
 
 ---
 
@@ -26,7 +27,9 @@ from LeapYeet. Either way, proceed to Step 2.
 
 ## Step 2: Add T114 Variant (if not present)
 
-If `variants/nrf52840/heltec_mesh_node_t114/` is missing, clone LeapYeet at the pinned SHA and copy it:
+If `variants/nrf52840/heltec_mesh_node_t114/` is missing, copy it from LeapYeet at the pinned SHA:
+
+Source: https://github.com/LeapYeet/firmware/tree/f49f9b7967311a08c7bf1c1af6e8f28671182cd1/variants/nrf52840/heltec_mesh_node_t114
 
 ```bash
 git clone https://github.com/LeapYeet/firmware.git /tmp/leapyeet
@@ -71,31 +74,45 @@ pio run --environment heltec-mesh-node-t114
 
 ## Step 3: Add Our Custom Modules
 
-Clone LeapYeet at the pinned SHA (if not already done) and copy our module files:
+Copy our module files from LeapYeet at the pinned SHA. These are our modules — they originated
+in this project, they just lived in the wrong repo.
+
+Sources:
+- https://github.com/LeapYeet/firmware/blob/f49f9b7967311a08c7bf1c1af6e8f28671182cd1/src/modules/FriendFinderModule.cpp
+- https://github.com/LeapYeet/firmware/blob/f49f9b7967311a08c7bf1c1af6e8f28671182cd1/src/modules/FriendFinderModule.h
+- https://github.com/LeapYeet/firmware/blob/f49f9b7967311a08c7bf1c1af6e8f28671182cd1/src/modules/MagnetometerModule.cpp
+- https://github.com/LeapYeet/firmware/blob/f49f9b7967311a08c7bf1c1af6e8f28671182cd1/src/modules/MagnetometerModule.h
 
 ```bash
-# These are our modules — they originated in this project, they just lived in the wrong repo
+git clone https://github.com/LeapYeet/firmware.git /tmp/leapyeet  # skip if already done
+cd /tmp/leapyeet && git checkout f49f9b7967311a08c7bf1c1af6e8f28671182cd1
 cp /tmp/leapyeet/src/modules/FriendFinderModule.cpp src/modules/
 cp /tmp/leapyeet/src/modules/FriendFinderModule.h   src/modules/
 cp /tmp/leapyeet/src/modules/MagnetometerModule.cpp src/modules/
 cp /tmp/leapyeet/src/modules/MagnetometerModule.h   src/modules/
 ```
 
-Also copy any generated protobuf files Friend Finder needs:
+Also copy the generated protobuf files Friend Finder depends on:
+
+Sources:
+- https://github.com/LeapYeet/firmware/blob/f49f9b7967311a08c7bf1c1af6e8f28671182cd1/src/mesh/generated/meshtastic/friendfinder.pb.cpp
+- https://github.com/LeapYeet/firmware/blob/f49f9b7967311a08c7bf1c1af6e8f28671182cd1/src/mesh/generated/meshtastic/friendfinder.pb.h
+
 ```bash
-# Check what pb files exist for friend finder
-find /tmp/leapyeet/src -name "friendfinder*"
-# Copy them to the same relative paths here
+cp /tmp/leapyeet/src/mesh/generated/meshtastic/friendfinder.pb.cpp src/mesh/generated/meshtastic/
+cp /tmp/leapyeet/src/mesh/generated/meshtastic/friendfinder.pb.h   src/mesh/generated/meshtastic/
 ```
 
 Also check for the MenuHandler changes — Friend Finder hooks into `src/graphics/draw/MenuHandler.cpp`.
-Diff the LeapYeet version against Meshtastic upstream and apply our additions:
+Diff the LeapYeet version against what's here and apply only our additions (Friend Finder menu
+entries, Track a Friend, Saved Places, Compass Cal). Do not blindly overwrite — Meshtastic
+upstream may have moved ahead.
+
+LeapYeet reference: https://github.com/LeapYeet/firmware/blob/f49f9b7967311a08c7bf1c1af6e8f28671182cd1/src/graphics/draw/MenuHandler.cpp
+
 ```bash
 diff /tmp/leapyeet/src/graphics/draw/MenuHandler.cpp src/graphics/draw/MenuHandler.cpp
 ```
-
-Apply only our additions (Friend Finder menu entries, Track a Friend, Saved Places, Compass Cal).
-Do not blindly overwrite — Meshtastic upstream may have moved ahead.
 
 Verify build still passes after adding modules.
 
@@ -130,13 +147,17 @@ not help — `qmcReadRaw` never returns, so code above it never runs.
 
 ### The Fix
 
-Copy `Wire_nRF52.cpp` from the PlatformIO framework package into `lib/Wire/` and add
+Copy `Wire_nRF52.cpp` from the nRF52 Arduino framework into `lib/Wire/` and add
 `millis()`-based timeouts to all six spin loops. PlatformIO automatically prefers files in
 the project `lib/` directory over the framework package — no build system hacks needed, and
 the fixed file is visible in this repo as real C++.
 
+Source (the exact SHA LeapYeet/Meshtastic pins for the nRF52 Arduino framework):
+https://github.com/meshtastic/Adafruit_nRF52_Arduino/blob/e13f5820002a4fb2a5e6754b42ace185277e5adf/libraries/Wire/Wire_nRF52.cpp
+
 ```bash
 mkdir -p lib/Wire
+# Either download directly from the URL above, or grab from the local PlatformIO cache:
 find ~/.platformio -name "Wire_nRF52.cpp" 2>/dev/null
 cp <found path> lib/Wire/Wire_nRF52.cpp
 ```
