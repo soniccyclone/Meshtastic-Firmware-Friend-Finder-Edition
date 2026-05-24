@@ -574,14 +574,6 @@ void FriendFinderModule::showConfirmationPrompt(uint32_t fromNode)
     pairingCandidateNodeNum = fromNode;
     currentState = FriendFinderState::AWAITING_CONFIRMATION;
 
-    // ff-builder native auto-pair patch: skip UI confirmation on the sim, auto-accept immediately so
-    // the pairing handshake progresses without a button tap.
-#if defined(FF_NATIVE_AUTO_PAIR)
-    LOG_INFO("[FriendFinder] FF_NATIVE_AUTO_PAIR: skipping UI confirmation, auto-accepting");
-    acceptPairingRequest();
-    return;
-#endif
-
     char msg[64];
     snprintf(msg, sizeof(msg), "Pair with %s?", getShortName(fromNode));
 
@@ -650,21 +642,12 @@ void FriendFinderModule::completePairing(uint32_t nodeNum)
 
     char msg[64];
     snprintf(msg, sizeof(msg), "%s Paired!", getShortName(nodeNum));
-    // ff-builder native auto-pair patch: completePairing uses screen-> unconditionally. On
-    // headless Portduino env:native the Screen object is never constructed and the
-    // global `screen` stays null, so any method call segfaults. A compile-time
-    // `#if HAS_SCREEN` gate is unreliable here because Screen.h drags HAS_SCREEN
-    // defined through an indirect include chain — use a runtime null check.
-    if (screen) {
-        screen->showSimpleBanner(msg, 2500);
-    }
+    screen->showSimpleBanner(msg, 2500);
 
     raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
 
-    if (screen) {
-        graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_base_menu;
-        screen->runNow();
-    }
+    graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_base_menu;
+    screen->runNow();
 }
 
 
