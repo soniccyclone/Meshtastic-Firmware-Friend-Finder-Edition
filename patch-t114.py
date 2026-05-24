@@ -1818,23 +1818,41 @@ def patch_wire_nrf52_timeouts():
     print(f"Patched {path}: TWIM spin-loop timeouts (helper + 2 functions)")
 
 
-# --- QMC re-init on consecutive failures (gh issue #43) -------------------
+# --- QMC re-init + bit-bang bus recovery (gh issue #43) -------------------
 #
 # Composes with patch_wire_nrf52_timeouts above. The Wire fix stops the
-# freeze by aborting a stuck TWIM and returning an error — but after a
-# force-reset the QMC5883L slave is left desynced, and just retrying the
-# same read at 100 ms cadence won't bring it back (the slave needs its
-# control registers reconfigured). TezlaKid's log on gh#43 shows exactly
-# this: ~70 s of healthy reads, then permanent "QMC read failed" spam
-# with no recovery.
+# freeze by aborting a stuck TWIM and returning an error. But after a
+# force-reset the QMC5883L slave can still be left desynced, and just
+# bouncing the master via magBus->end()/begin() doesn't fix either of
+# the two failure modes seen in TezlaKid's logs:
 #
-# Add qmcFailCount to MagnetometerModule. Increment on each failure;
-# clear on success. After 3 consecutive failures (~300 ms of bad bus),
-# bounce the bus (magBus->end()/begin()) and re-run qmcInit() to write
-# fresh control registers to the slave. That sequence was the original
-# PR #41 logic — it didn't help on its own because qmcReadRaw never
-# returned, but it's exactly right as the second half of the recovery
-# stack now that Wire returns false on timeout.
+#   1. Slave clamping SDA low mid-transaction. end()/begin() toggles
+#      the master's TWIM enable but never touches SDA/SCL pin state,
+#      so a slave holding the line wins. qmcInit()'s SOFT_RST write to
+#      CTRL2 then NACKs — exactly the "QMC write CTRL2 (soft reset)
+#      failed" line spamming the recovery log.
+#
+#   2. Half-dead chip returning all-zero data. After a botched recovery
+#      the slave sometimes ACKs reads but returns x=y=z=0 forever. The
+#      first version of this patch counted that as a "successful" read,
+#      reset the streak counter, and recovery never re-fired. User-
+#      visible symptom: compass stuck at heading=360° (atan2(0,0)).
+#
+# Fix:
+#   - Treat all-zero raw reads as a failure (a true magnetic-zero is
+#     not physically possible in any normal environment — Earth's field
+#     produces a few hundred LSB on the strongest axis at default gain)
+#   - On 3 consecutive failures (~300 ms of bad bus), do a real I2C bus
+#     recovery: bit-bang up to 9 SCL clocks with SDA as input, watching
+#     for the slave to release; then issue START+STOP to leave the bus
+#     idle. Only after that do magBus->end()/begin() + qmcInit() to
+#     reconfigure the slave's control registers
+#
+# Open-drain emulation on nRF52: never drive a line HIGH (would fight
+# external pullups on other slaves). "High" = INPUT_PULLUP, "low" =
+# OUTPUT + digitalWrite(LOW). Bus pin detection by pointer comparison
+# against the global Wire/Wire1 instances (TwoWire has no public pin
+# accessor).
 #
 # See gh issue #43 and docs/wire-i2c-timeout-plan.md.
 
@@ -1859,12 +1877,52 @@ MAG_READ_OLD = (
 MAG_READ_NEW = """\
 // Read MAG (bus-agnostic)
     int16_t rx, ry, rz;
-    if (!qmcReadRaw(*magBus, magAddr, rx, ry, rz)) {
+    bool readOk  = qmcReadRaw(*magBus, magAddr, rx, ry, rz);
+    bool allZero = (rx == 0 && ry == 0 && rz == 0);
+    if (!readOk || allZero) {
         qmcFailCount++;
-        LOG_INFO("[Magnetometer] QMC read failed (streak %d).", (int)qmcFailCount);
+        LOG_INFO("[Magnetometer] QMC read %s (streak %d).",
+                 readOk ? "returned all-zero (chip wedged)" : "failed",
+                 (int)qmcFailCount);
         if (qmcFailCount >= 3) {
-            LOG_INFO("[Magnetometer] Resetting I2C bus after %d consecutive failures.", (int)qmcFailCount);
+            LOG_INFO("[Magnetometer] Recovering I2C bus after %d consecutive failures.", (int)qmcFailCount);
+
+            // Identify the bus's actual SDA/SCL pins for bit-bang recovery.
+            // TwoWire exposes no public pin getter; pointer-compare instead.
+            uint8_t sdaPin = (magBus == &Wire1) ? PIN_WIRE1_SDA : PIN_WIRE_SDA;
+            uint8_t sclPin = (magBus == &Wire1) ? PIN_WIRE1_SCL : PIN_WIRE_SCL;
+
+            // Drop the TWIM peripheral so we can drive the pins manually.
             magBus->end();
+
+            // Release both lines (open-drain "high" = INPUT_PULLUP).
+            pinMode(sdaPin, INPUT_PULLUP);
+            pinMode(sclPin, INPUT_PULLUP);
+            delayMicroseconds(5);
+
+            // Up to 9 SCL pulses force a slave mid-byte to finish/abort
+            // its transaction and release SDA. Break early if SDA goes
+            // high (slave released).
+            for (int i = 0; i < 9; i++) {
+                pinMode(sclPin, OUTPUT);
+                digitalWrite(sclPin, LOW);
+                delayMicroseconds(5);
+                pinMode(sclPin, INPUT_PULLUP);
+                delayMicroseconds(5);
+                if (digitalRead(sdaPin) == HIGH) break;
+            }
+
+            // START (SDA falls while SCL high) + STOP (SDA rises while
+            // SCL high) to leave the bus in clean idle state.
+            pinMode(sdaPin, INPUT_PULLUP);
+            delayMicroseconds(5);
+            pinMode(sdaPin, OUTPUT);
+            digitalWrite(sdaPin, LOW);
+            delayMicroseconds(5);
+            pinMode(sdaPin, INPUT_PULLUP);
+            delayMicroseconds(5);
+
+            // Hand the bus back to TWIM and reconfigure the slave.
             magBus->begin();
             qmcInit(*magBus, magAddr);
             qmcFailCount = 0;
