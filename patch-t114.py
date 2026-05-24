@@ -1816,6 +1816,161 @@ def patch_wire_nrf52_timeouts():
     print(f"Patched {path}: TWIM spin-loop timeouts (helper + 2 functions)")
 
 
+MAG_MODULE_CPP = "src/modules/MagnetometerModule.cpp"
+MAG_MODULE_H   = "src/modules/MagnetometerModule.h"
+
+
+# --- QMC resilience (gh issue #43) ----------------------------------------
+#
+# Three coordinated changes that attack the *cause* of the I2C-bus-stuck
+# failure mode rather than recovering from it after the fact:
+#
+#   ff-0w2  Lower the chip's ODR from 200 Hz to 50 Hz (CTRL1 0x1D -> 0x05).
+#           At 200 Hz the chip's internal sampling state machine is
+#           running constantly — every sample window is an exposure point
+#           where a coincident RF glitch can wedge the slave mid-byte.
+#           50 Hz is 4x less internal activity; sample staleness max 20 ms
+#           is invisible to the compass UI. Also corrects RNG: upstream
+#           wrote 01 commented as "2G" but per the QMC5883L datasheet 01
+#           is 8G — we want true 2G (00). Earth's field is ~0.5 G so 2 G
+#           full-scale gives 4x headroom and better SNR.
+#
+#   ff-h3y  Lower the polling cadence from 50 ms (20 Hz) to 250 ms (4 Hz).
+#           The compass UI does not need 20 readings per second. 4 Hz is
+#           snappier than the eye can read a heading and quartiers the
+#           I2C transaction count, proportionally reducing exposure to
+#           RF-coincident transactions.
+#
+#   ff-hfa  Disciplined recovery: increment a streak counter on each read
+#           failure; at streak == 5 (~1.25 s of bad bus) attempt ONE
+#           recovery (magBus->end() + brief delay + magBus->begin() +
+#           qmcInit()) — no bit-bang, no Wire-side recovery. If the very
+#           next read still fails (streak >= 6), set headingIsValid=false
+#           so the existing if(!headingIsValid) early-exit takes over and
+#           the mag stays quiet until reboot. NO preemptive recovery at
+#           boot — only after observed runtime failure.
+#
+# Together (1)+(2) should collapse the failure rate to "occasionally needs
+# recovery" instead of "needs recovery within 70 seconds, every time."
+# (3) handles the residual without the band-aid stacking that PR #44 fell
+# into.
+
+QMC_RES_H_OLD = (
+    "// Logging cadence\n"
+    "    uint32_t lastLogMs = 0;\n"
+)
+QMC_RES_H_NEW = (
+    "// Logging cadence\n"
+    "    uint32_t lastLogMs = 0;\n"
+    "    uint8_t  qmcFailCount = 0;  // ff-builder (gh #43): I2C read-failure streak\n"
+)
+
+# ODR: CTRL1 0x1D -> 0x05.
+QMC_RES_CTRL1_OLD = (
+    "    // CTRL1: OSR=512 (00), RNG=2G (01), ODR=200Hz (11), MODE=continuous (01) -> 0x1D\n"
+    "    if (!qmcWriteReg(bus, addr, QMC_REG_CTRL1, 0x1D)) {\n"
+)
+QMC_RES_CTRL1_NEW = (
+    "    // ff-builder (gh #43): drop ODR from 200Hz to 50Hz; correct RNG to 2G.\n"
+    "    //   At 200Hz the internal state machine runs continuously and every\n"
+    "    //   sample window is an exposure point for RF-coincident I2C glitches.\n"
+    "    //   50Hz is 4x less activity; sample staleness max 20ms.\n"
+    "    //   Upstream comment said RNG=01 was 2G but per QMC5883L datasheet 01\n"
+    "    //   is 8G; use 00 for true 2G (Earth ~0.5G, 4x headroom).\n"
+    "    // CTRL1: OSR=512 (00), RNG=2G (00), ODR=50Hz (01), MODE=continuous (01) -> 0x05\n"
+    "    if (!qmcWriteReg(bus, addr, QMC_REG_CTRL1, 0x05)) {\n"
+)
+
+# Failure recovery block.
+QMC_RES_READ_OLD = (
+    "    // Read MAG (bus-agnostic)\n"
+    "    int16_t rx, ry, rz;\n"
+    "    if (!qmcReadRaw(*magBus, magAddr, rx, ry, rz)) {\n"
+    "        LOG_INFO(\"[Magnetometer] QMC read failed; will retry.\");\n"
+    "        return 100;\n"
+    "    }\n"
+)
+QMC_RES_READ_NEW = """\
+// Read MAG (bus-agnostic)
+    int16_t rx, ry, rz;
+    if (!qmcReadRaw(*magBus, magAddr, rx, ry, rz)) {
+        qmcFailCount++;
+        LOG_INFO("[Magnetometer] QMC read failed (streak %d).", (int)qmcFailCount);
+        if (qmcFailCount == 5) {
+            // ff-builder (gh #43): one recovery attempt — bus bounce +
+            // chip reconfigure. No bit-bang, no Wire-side recovery.
+            LOG_WARN("[Magnetometer] Bus stuck. Bouncing %s and reinitializing QMC...",
+                     (magBus == &Wire) ? "Wire" : "Wire1");
+            magBus->end();
+            delay(5);
+            magBus->begin();
+            (void)qmcInit(*magBus, magAddr);
+        } else if (qmcFailCount >= 6) {
+            // Recovery did not bring the chip back. Mark disabled —
+            // the existing if(!headingIsValid) early-exit in runOnce
+            // takes over and we stay quiet until reboot.
+            LOG_WARN("[Magnetometer] QMC unrecoverable after bus reset. "
+                     "Disabling magnetometer until reboot.");
+            headingIsValid = false;
+        }
+        return 250;
+    }
+    qmcFailCount = 0;
+"""
+
+# Polling cadence: bottom of runOnce, "return 50;" -> "return 250;".
+# Anchored on the two lines immediately above so the match is unique.
+QMC_RES_TAIL_OLD = (
+    "        lastLogMs = now;\n"
+    "    }\n"
+    "\n"
+    "    return 50;\n"
+    "}\n"
+)
+QMC_RES_TAIL_NEW = (
+    "        lastLogMs = now;\n"
+    "    }\n"
+    "\n"
+    "    // ff-builder (gh #43): 250ms (4Hz) is plenty for compass UI and\n"
+    "    // quartiers I2C transactions vs. the upstream 50ms (20Hz) cadence.\n"
+    "    return 250;\n"
+    "}\n"
+)
+
+
+def patch_qmc_resilience():
+    h_existing = open(MAG_MODULE_H).read()
+    if "qmcFailCount" in h_existing:
+        print(f"Skipped {MAG_MODULE_H} + {MAG_MODULE_CPP}: already patched")
+        return
+
+    cpp_existing = open(MAG_MODULE_CPP).read()
+    checks = [
+        (MAG_MODULE_H,   QMC_RES_H_OLD,     "header: lastLogMs anchor"),
+        (MAG_MODULE_CPP, QMC_RES_CTRL1_OLD, "cpp: qmcInit CTRL1 write"),
+        (MAG_MODULE_CPP, QMC_RES_READ_OLD,  "cpp: runOnce read-failure block"),
+        (MAG_MODULE_CPP, QMC_RES_TAIL_OLD,  "cpp: runOnce tail return"),
+    ]
+    for path, old, label in checks:
+        src = h_existing if path == MAG_MODULE_H else cpp_existing
+        if old not in src:
+            sys.exit(f"ERROR: qmc_resilience anchor not found ({label}) in {path}")
+
+    h_new = h_existing.replace(QMC_RES_H_OLD, QMC_RES_H_NEW, 1)
+    with open(MAG_MODULE_H, "w") as f:
+        f.write(h_new)
+
+    cpp_new = cpp_existing
+    cpp_new = cpp_new.replace(QMC_RES_CTRL1_OLD, QMC_RES_CTRL1_NEW, 1)
+    cpp_new = cpp_new.replace(QMC_RES_READ_OLD,  QMC_RES_READ_NEW,  1)
+    cpp_new = cpp_new.replace(QMC_RES_TAIL_OLD,  QMC_RES_TAIL_NEW,  1)
+    with open(MAG_MODULE_CPP, "w") as f:
+        f.write(cpp_new)
+
+    print(f"Patched {MAG_MODULE_H} + {MAG_MODULE_CPP}: QMC resilience "
+          f"(ODR 200->50Hz, polling 50->250ms, safety-net recovery)")
+
+
 if __name__ == "__main__":
     patch_variant_ini()
     patch_friend_finder_include()
@@ -1823,3 +1978,4 @@ if __name__ == "__main__":
     patch_menu_ordering()
     patch_compass_redesign()
     patch_wire_nrf52_timeouts()
+    patch_qmc_resilience()
