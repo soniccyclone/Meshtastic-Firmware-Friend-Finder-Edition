@@ -1886,9 +1886,44 @@ MAG_READ_NEW = """\
                  (int)qmcFailCount);
         if (qmcFailCount >= 3) {
             LOG_INFO("[Magnetometer] Recovering I2C bus after %d consecutive failures.", (int)qmcFailCount);
+
+            // Identify the bus's actual SDA/SCL pins for bit-bang recovery.
+            // TwoWire exposes no public pin getter; pointer-compare instead.
             uint8_t sdaPin = (magBus == &Wire1) ? PIN_WIRE1_SDA : PIN_WIRE_SDA;
             uint8_t sclPin = (magBus == &Wire1) ? PIN_WIRE1_SCL : PIN_WIRE_SCL;
-            recoverI2cBus(magBus, sdaPin, sclPin);
+
+            // Drop the TWIM peripheral so we can drive the pins manually.
+            magBus->end();
+
+            // Release both lines (open-drain "high" = INPUT_PULLUP).
+            pinMode(sdaPin, INPUT_PULLUP);
+            pinMode(sclPin, INPUT_PULLUP);
+            delayMicroseconds(5);
+
+            // Up to 9 SCL pulses force a slave mid-byte to finish/abort
+            // its transaction and release SDA. Break early if SDA goes
+            // high (slave released).
+            for (int i = 0; i < 9; i++) {
+                pinMode(sclPin, OUTPUT);
+                digitalWrite(sclPin, LOW);
+                delayMicroseconds(5);
+                pinMode(sclPin, INPUT_PULLUP);
+                delayMicroseconds(5);
+                if (digitalRead(sdaPin) == HIGH) break;
+            }
+
+            // START (SDA falls while SCL high) + STOP (SDA rises while
+            // SCL high) to leave the bus in clean idle state.
+            pinMode(sdaPin, INPUT_PULLUP);
+            delayMicroseconds(5);
+            pinMode(sdaPin, OUTPUT);
+            digitalWrite(sdaPin, LOW);
+            delayMicroseconds(5);
+            pinMode(sdaPin, INPUT_PULLUP);
+            delayMicroseconds(5);
+
+            // Hand the bus back to TWIM and reconfigure the slave.
+            magBus->begin();
             qmcInit(*magBus, magAddr);
             qmcFailCount = 0;
         }
@@ -1896,60 +1931,6 @@ MAG_READ_NEW = """\
     }
     qmcFailCount = 0;
 """
-
-# selectMagOnEitherBus: inject the helper function above the definition,
-# and prepend two recoverI2cBus() calls at the top of the function body —
-# unsticks a slave clamping SDA from a previous session before probing
-# (which would otherwise NACK and leave the chip looking absent forever
-# because headingIsValid is only set once, during initSensors()).
-MAG_SELECT_OLD = """\
-bool MagnetometerModule::selectMagOnEitherBus() {
-    struct Probe {
-        TwoWire* bus;"""
-
-MAG_SELECT_NEW = """\
-// ff-builder: bit-bang I2C bus recovery — frees a slave clamping SDA low.
-// Open-drain emulation: "high" = INPUT_PULLUP (external pullup raises
-// the line); "low" = OUTPUT + digitalWrite(LOW). Never drive HIGH —
-// would fight pullups on other devices. Called from boot (before the
-// probe loop) and from runtime (after 3 consecutive read failures).
-// See gh #43.
-static void recoverI2cBus(TwoWire *bus, uint8_t sdaPin, uint8_t sclPin) {
-    bus->end();
-    pinMode(sdaPin, INPUT_PULLUP);
-    pinMode(sclPin, INPUT_PULLUP);
-    delayMicroseconds(5);
-    // Up to 9 SCL pulses force a slave mid-byte to finish/abort its
-    // transaction and release SDA. Bail early if SDA goes high.
-    for (int i = 0; i < 9; i++) {
-        pinMode(sclPin, OUTPUT);
-        digitalWrite(sclPin, LOW);
-        delayMicroseconds(5);
-        pinMode(sclPin, INPUT_PULLUP);
-        delayMicroseconds(5);
-        if (digitalRead(sdaPin) == HIGH) break;
-    }
-    // START + STOP to leave the bus in clean idle state.
-    pinMode(sdaPin, INPUT_PULLUP);
-    delayMicroseconds(5);
-    pinMode(sdaPin, OUTPUT);
-    digitalWrite(sdaPin, LOW);
-    delayMicroseconds(5);
-    pinMode(sdaPin, INPUT_PULLUP);
-    delayMicroseconds(5);
-    bus->begin();
-}
-
-bool MagnetometerModule::selectMagOnEitherBus() {
-    // ff-builder: unstick any slave clamping SDA from a previous session
-    // before probing — otherwise probeAddr() NACKs and the chip looks
-    // permanently absent (headingIsValid is set once at init and never
-    // updates after). See gh #43.
-    recoverI2cBus(&Wire,  PIN_WIRE_SDA,  PIN_WIRE_SCL);
-    recoverI2cBus(&Wire1, PIN_WIRE1_SDA, PIN_WIRE1_SCL);
-
-    struct Probe {
-        TwoWire* bus;"""
 
 
 def patch_mag_i2c_timeout():
@@ -1962,7 +1943,6 @@ def patch_mag_i2c_timeout():
     checks = [
         (MAG_MODULE_H,   MAG_H_OLD),
         (MAG_MODULE_CPP, MAG_READ_OLD),
-        (MAG_MODULE_CPP, MAG_SELECT_OLD),
     ]
     for path, old in checks:
         src = open(path).read()
@@ -1975,12 +1955,11 @@ def patch_mag_i2c_timeout():
         f.write(h)
 
     cpp = open(MAG_MODULE_CPP).read()
-    cpp = cpp.replace(MAG_SELECT_OLD, MAG_SELECT_NEW, 1)
     cpp = cpp.replace(MAG_READ_OLD, MAG_READ_NEW, 1)
     with open(MAG_MODULE_CPP, "w") as f:
         f.write(cpp)
 
-    print(f"Patched {MAG_MODULE_H} + {MAG_MODULE_CPP}: mag I2C timeout/bus-reset recovery (boot + runtime)")
+    print(f"Patched {MAG_MODULE_H} + {MAG_MODULE_CPP}: mag I2C timeout/bus-reset recovery")
 
 
 if __name__ == "__main__":
