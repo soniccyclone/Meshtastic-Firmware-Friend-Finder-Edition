@@ -33,6 +33,7 @@ and/or delete this script.
 
 Run from the firmware source root.
 """
+import os
 import sys
 
 VARIANT_INI = "variants/nrf52840/heltec_mesh_node_t114/platformio.ini"
@@ -1483,9 +1484,342 @@ def patch_compass_redesign():
         print(f"Patched {MENU_HANDLER_CPP}: compass redesign ({len(checks)} patches)")
 
 
+# --- Wire_nRF52 TWIM timeouts (T114 freeze fix) ---------------------------
+#
+# framework-arduinoadafruitnrf52/libraries/Wire/Wire_nRF52.cpp uses bare
+# spin loops on TWIM EVENTS_* with no timeout. When the QMC5883L on Wire1
+# stalls the peripheral (LoRa RF noise is the likely trigger), no event
+# ever fires and the CPU spins forever — the device freezes hard.
+# TezlaKid's log ends mid-operation with no error: that's the symptom.
+#
+# A failure counter in MagnetometerModule cannot fix this: qmcReadRaw
+# never returns once the peripheral is stuck, so nothing above the Wire
+# layer ever runs. The fix has to live inside Wire_nRF52.cpp itself.
+#
+# This block patches the framework file in PlatformIO's package cache
+# (it does not live in the firmware-src tree). For each spin loop, wrap
+# the wait with a deadline; on timeout, call a static helper that aborts
+# the TWIM peripheral (TASKS_STOP → ENABLE bounce → clear events) and
+# return the Wire-convention error code (0 from requestFrom, 4 from
+# endTransmission).
+#
+# Upstream anchored at SHA e13f5820002a4fb2a5e6754b42ace185277e5adf of
+# meshtastic/Adafruit_nRF52_Arduino, which LeapYeet/Meshtastic pin via
+# framework-arduinoadafruitnrf52. Anchors are exact upstream text.
+#
+# See docs/wire-i2c-timeout-plan.md.
+
+WIRE_NRF52_RELPATH = (
+    "packages/framework-arduinoadafruitnrf52/libraries/Wire/Wire_nRF52.cpp"
+)
+WIRE_NRF52_MARKER = "// ff-builder: TWIM timeout guards"
+
+WIRE_NRF52_HELPER = """// ff-builder: TWIM timeout guards
+// Spin loops in requestFrom/endTransmission have no timeout upstream; a
+// stuck peripheral (RF glitch + slave holding SDA) freezes the CPU
+// forever. Bound each wait by a deadline; on timeout abort the TWIM.
+#ifndef FFB_TWIM_TIMEOUT_MS
+#define FFB_TWIM_TIMEOUT_MS 50
+#endif
+static void ffb_twim_force_reset(NRF_TWIM_Type *twim) {
+  twim->TASKS_STOP = 0x1UL;
+  uint32_t _ffb_d = millis() + 10;
+  while (!twim->EVENTS_STOPPED && (int32_t)(millis() - _ffb_d) < 0) {}
+  if (!twim->EVENTS_STOPPED) {
+    twim->ENABLE = (TWIM_ENABLE_ENABLE_Disabled << TWIM_ENABLE_ENABLE_Pos);
+    twim->ENABLE = (TWIM_ENABLE_ENABLE_Enabled  << TWIM_ENABLE_ENABLE_Pos);
+  }
+  twim->EVENTS_STOPPED   = 0x0UL;
+  twim->EVENTS_ERROR     = 0x0UL;
+  twim->EVENTS_TXSTARTED = 0x0UL;
+  twim->EVENTS_RXSTARTED = 0x0UL;
+  twim->EVENTS_LASTTX    = 0x0UL;
+  twim->EVENTS_LASTRX    = 0x0UL;
+  twim->EVENTS_SUSPENDED = 0x0UL;
+}
+
+"""
+
+# requestFrom: 4 spin loops. Returns uint8_t byte count; 0 on timeout.
+WIRE_NRF52_REQUEST_FROM_OLD = """uint8_t TwoWire::requestFrom(uint8_t address, size_t quantity, bool stopBit)
+{
+  if(quantity == 0)
+  {
+    return 0;
+  }
+
+  size_t byteRead = 0;
+  rxBuffer.clear();
+
+  _p_twim->ADDRESS = address;
+
+  _p_twim->TASKS_RESUME = 0x1UL;
+  _p_twim->RXD.PTR = (uint32_t)rxBuffer._aucBuffer;
+  _p_twim->RXD.MAXCNT = quantity;
+  _p_twim->TASKS_STARTRX = 0x1UL;
+
+  while(!_p_twim->EVENTS_RXSTARTED && !_p_twim->EVENTS_ERROR);
+  _p_twim->EVENTS_RXSTARTED = 0x0UL;
+
+  while(!_p_twim->EVENTS_LASTRX && !_p_twim->EVENTS_ERROR);
+  _p_twim->EVENTS_LASTRX = 0x0UL;
+
+  if (stopBit || _p_twim->EVENTS_ERROR)
+  {
+    _p_twim->TASKS_STOP = 0x1UL;
+    while(!_p_twim->EVENTS_STOPPED);
+    _p_twim->EVENTS_STOPPED = 0x0UL;
+  }
+  else
+  {
+    _p_twim->TASKS_SUSPEND = 0x1UL;
+    while(!_p_twim->EVENTS_SUSPENDED);
+    _p_twim->EVENTS_SUSPENDED = 0x0UL;
+  }
+
+  if (_p_twim->EVENTS_ERROR)
+  {
+    _p_twim->EVENTS_ERROR = 0x0UL;
+  }
+
+  byteRead = rxBuffer._iHead = _p_twim->RXD.AMOUNT;
+
+  return byteRead;
+}"""
+
+WIRE_NRF52_REQUEST_FROM_NEW = """uint8_t TwoWire::requestFrom(uint8_t address, size_t quantity, bool stopBit)
+{
+  if(quantity == 0)
+  {
+    return 0;
+  }
+
+  size_t byteRead = 0;
+  rxBuffer.clear();
+
+  _p_twim->ADDRESS = address;
+
+  _p_twim->TASKS_RESUME = 0x1UL;
+  _p_twim->RXD.PTR = (uint32_t)rxBuffer._aucBuffer;
+  _p_twim->RXD.MAXCNT = quantity;
+  _p_twim->TASKS_STARTRX = 0x1UL;
+
+  {
+    uint32_t _ffb_d = millis() + FFB_TWIM_TIMEOUT_MS;
+    while (!_p_twim->EVENTS_RXSTARTED && !_p_twim->EVENTS_ERROR) {
+      if ((int32_t)(millis() - _ffb_d) >= 0) { ffb_twim_force_reset(_p_twim); return 0; }
+    }
+  }
+  _p_twim->EVENTS_RXSTARTED = 0x0UL;
+
+  {
+    uint32_t _ffb_d = millis() + FFB_TWIM_TIMEOUT_MS;
+    while (!_p_twim->EVENTS_LASTRX && !_p_twim->EVENTS_ERROR) {
+      if ((int32_t)(millis() - _ffb_d) >= 0) { ffb_twim_force_reset(_p_twim); return 0; }
+    }
+  }
+  _p_twim->EVENTS_LASTRX = 0x0UL;
+
+  if (stopBit || _p_twim->EVENTS_ERROR)
+  {
+    _p_twim->TASKS_STOP = 0x1UL;
+    {
+      uint32_t _ffb_d = millis() + FFB_TWIM_TIMEOUT_MS;
+      while (!_p_twim->EVENTS_STOPPED) {
+        if ((int32_t)(millis() - _ffb_d) >= 0) { ffb_twim_force_reset(_p_twim); return 0; }
+      }
+    }
+    _p_twim->EVENTS_STOPPED = 0x0UL;
+  }
+  else
+  {
+    _p_twim->TASKS_SUSPEND = 0x1UL;
+    {
+      uint32_t _ffb_d = millis() + FFB_TWIM_TIMEOUT_MS;
+      while (!_p_twim->EVENTS_SUSPENDED) {
+        if ((int32_t)(millis() - _ffb_d) >= 0) { ffb_twim_force_reset(_p_twim); return 0; }
+      }
+    }
+    _p_twim->EVENTS_SUSPENDED = 0x0UL;
+  }
+
+  if (_p_twim->EVENTS_ERROR)
+  {
+    _p_twim->EVENTS_ERROR = 0x0UL;
+  }
+
+  byteRead = rxBuffer._iHead = _p_twim->RXD.AMOUNT;
+
+  return byteRead;
+}"""
+
+# endTransmission(bool): 4 spin loops. Returns uint8_t error code; 4 on timeout
+# ("other error" per the Wire convention documented in the upstream comment).
+WIRE_NRF52_END_TX_OLD = """uint8_t TwoWire::endTransmission(bool stopBit)
+{
+  transmissionBegun = false ;
+
+  // Start I2C transmission
+  _p_twim->ADDRESS = txAddress;
+
+  // just in case twi is stopped by bus error such as secondary device reset/stalled without replying ACK/NACK
+  _p_twim->EVENTS_STOPPED = 0x0UL;
+  _p_twim->TASKS_RESUME = 0x1UL;
+
+  _p_twim->TXD.PTR = (uint32_t)txBuffer._aucBuffer;
+  _p_twim->TXD.MAXCNT = txBuffer.available();
+
+  _p_twim->TASKS_STARTTX = 0x1UL;
+
+  while(!_p_twim->EVENTS_TXSTARTED && !_p_twim->EVENTS_ERROR);
+  _p_twim->EVENTS_TXSTARTED = 0x0UL;
+
+  if (txBuffer.available()) {
+    while(!_p_twim->EVENTS_LASTTX && !_p_twim->EVENTS_ERROR);
+  }
+  _p_twim->EVENTS_LASTTX = 0x0UL;
+
+  if (stopBit || _p_twim->EVENTS_ERROR)
+  {
+    _p_twim->TASKS_STOP = 0x1UL;
+    while(!_p_twim->EVENTS_STOPPED);
+    _p_twim->EVENTS_STOPPED = 0x0UL;
+  }
+  else
+  {
+    _p_twim->TASKS_SUSPEND = 0x1UL;
+    while(!_p_twim->EVENTS_SUSPENDED);
+    _p_twim->EVENTS_SUSPENDED = 0x0UL;
+  }"""
+
+WIRE_NRF52_END_TX_NEW = """uint8_t TwoWire::endTransmission(bool stopBit)
+{
+  transmissionBegun = false ;
+
+  // Start I2C transmission
+  _p_twim->ADDRESS = txAddress;
+
+  // just in case twi is stopped by bus error such as secondary device reset/stalled without replying ACK/NACK
+  _p_twim->EVENTS_STOPPED = 0x0UL;
+  _p_twim->TASKS_RESUME = 0x1UL;
+
+  _p_twim->TXD.PTR = (uint32_t)txBuffer._aucBuffer;
+  _p_twim->TXD.MAXCNT = txBuffer.available();
+
+  _p_twim->TASKS_STARTTX = 0x1UL;
+
+  {
+    uint32_t _ffb_d = millis() + FFB_TWIM_TIMEOUT_MS;
+    while (!_p_twim->EVENTS_TXSTARTED && !_p_twim->EVENTS_ERROR) {
+      if ((int32_t)(millis() - _ffb_d) >= 0) { ffb_twim_force_reset(_p_twim); return 4; }
+    }
+  }
+  _p_twim->EVENTS_TXSTARTED = 0x0UL;
+
+  if (txBuffer.available()) {
+    uint32_t _ffb_d = millis() + FFB_TWIM_TIMEOUT_MS;
+    while (!_p_twim->EVENTS_LASTTX && !_p_twim->EVENTS_ERROR) {
+      if ((int32_t)(millis() - _ffb_d) >= 0) { ffb_twim_force_reset(_p_twim); return 4; }
+    }
+  }
+  _p_twim->EVENTS_LASTTX = 0x0UL;
+
+  if (stopBit || _p_twim->EVENTS_ERROR)
+  {
+    _p_twim->TASKS_STOP = 0x1UL;
+    {
+      uint32_t _ffb_d = millis() + FFB_TWIM_TIMEOUT_MS;
+      while (!_p_twim->EVENTS_STOPPED) {
+        if ((int32_t)(millis() - _ffb_d) >= 0) { ffb_twim_force_reset(_p_twim); return 4; }
+      }
+    }
+    _p_twim->EVENTS_STOPPED = 0x0UL;
+  }
+  else
+  {
+    _p_twim->TASKS_SUSPEND = 0x1UL;
+    {
+      uint32_t _ffb_d = millis() + FFB_TWIM_TIMEOUT_MS;
+      while (!_p_twim->EVENTS_SUSPENDED) {
+        if ((int32_t)(millis() - _ffb_d) >= 0) { ffb_twim_force_reset(_p_twim); return 4; }
+      }
+    }
+    _p_twim->EVENTS_SUSPENDED = 0x0UL;
+  }"""
+
+# Helper goes right above the requestFrom signature (unique in the file).
+WIRE_NRF52_HELPER_ANCHOR = (
+    "uint8_t TwoWire::requestFrom(uint8_t address, size_t quantity, bool stopBit)"
+)
+
+
+def find_wire_nrf52_cpp():
+    """Locate Wire_nRF52.cpp in PlatformIO's framework package cache.
+
+    PlatformIO defaults its core dir to $HOME/.platformio but honors
+    $PLATFORMIO_CORE_DIR. In the ff-builder Docker image the build runs as
+    root, so /root/.platformio is the practical default. Check all three.
+    """
+    candidates = []
+    if "PLATFORMIO_CORE_DIR" in os.environ:
+        candidates.append(
+            os.path.join(os.environ["PLATFORMIO_CORE_DIR"], WIRE_NRF52_RELPATH)
+        )
+    candidates += [
+        os.path.expanduser(os.path.join("~/.platformio", WIRE_NRF52_RELPATH)),
+        os.path.join("/root/.platformio", WIRE_NRF52_RELPATH),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    sys.exit(
+        "ERROR: Wire_nRF52.cpp not found in any of:\n  "
+        + "\n  ".join(candidates)
+        + "\n(has the nRF52 framework been installed via `pio pkg install`?)"
+    )
+
+
+def patch_wire_nrf52_timeouts():
+    path = find_wire_nrf52_cpp()
+    with open(path) as f:
+        content = f.read()
+
+    if WIRE_NRF52_MARKER in content:
+        print(f"Skipped {path}: already patched")
+        return
+
+    missing = []
+    if WIRE_NRF52_HELPER_ANCHOR not in content:
+        missing.append("helper anchor (requestFrom signature)")
+    if WIRE_NRF52_REQUEST_FROM_OLD not in content:
+        missing.append("requestFrom body")
+    if WIRE_NRF52_END_TX_OLD not in content:
+        missing.append("endTransmission body")
+    if missing:
+        sys.exit(
+            f"ERROR: {path} does not match expected upstream text "
+            f"(missing: {', '.join(missing)}). "
+            "Has framework-arduinoadafruitnrf52 drifted from "
+            "SHA e13f5820002a4fb2a5e6754b42ace185277e5adf?"
+        )
+
+    content = content.replace(
+        WIRE_NRF52_HELPER_ANCHOR,
+        WIRE_NRF52_HELPER + WIRE_NRF52_HELPER_ANCHOR,
+        1,
+    )
+    content = content.replace(WIRE_NRF52_REQUEST_FROM_OLD, WIRE_NRF52_REQUEST_FROM_NEW, 1)
+    content = content.replace(WIRE_NRF52_END_TX_OLD, WIRE_NRF52_END_TX_NEW, 1)
+
+    with open(path, "w") as f:
+        f.write(content)
+    print(f"Patched {path}: TWIM spin-loop timeouts (helper + 2 functions)")
+
+
 if __name__ == "__main__":
     patch_variant_ini()
     patch_friend_finder_include()
     patch_friend_finder_persistence()
     patch_menu_ordering()
     patch_compass_redesign()
+    patch_wire_nrf52_timeouts()
