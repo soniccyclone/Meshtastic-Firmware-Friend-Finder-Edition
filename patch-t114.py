@@ -39,6 +39,8 @@ import sys
 VARIANT_INI = "variants/nrf52840/heltec_mesh_node_t114/platformio.ini"
 FRIEND_FINDER_CPP = "src/modules/FriendFinderModule.cpp"
 MENU_HANDLER_CPP = "src/graphics/draw/MenuHandler.cpp"
+MAG_MODULE_CPP = "src/modules/MagnetometerModule.cpp"
+MAG_MODULE_H   = "src/modules/MagnetometerModule.h"
 MARKER = "# ff-builder patches"
 PERSIST_MARKER = "// ff-builder: persist friends to LittleFS"
 MENU_ORDERING_MARKER = "// ff-builder: menu ordering"
@@ -1816,6 +1818,92 @@ def patch_wire_nrf52_timeouts():
     print(f"Patched {path}: TWIM spin-loop timeouts (helper + 2 functions)")
 
 
+# --- QMC re-init on consecutive failures (gh issue #43) -------------------
+#
+# Composes with patch_wire_nrf52_timeouts above. The Wire fix stops the
+# freeze by aborting a stuck TWIM and returning an error — but after a
+# force-reset the QMC5883L slave is left desynced, and just retrying the
+# same read at 100 ms cadence won't bring it back (the slave needs its
+# control registers reconfigured). TezlaKid's log on gh#43 shows exactly
+# this: ~70 s of healthy reads, then permanent "QMC read failed" spam
+# with no recovery.
+#
+# Add qmcFailCount to MagnetometerModule. Increment on each failure;
+# clear on success. After 3 consecutive failures (~300 ms of bad bus),
+# bounce the bus (magBus->end()/begin()) and re-run qmcInit() to write
+# fresh control registers to the slave. That sequence was the original
+# PR #41 logic — it didn't help on its own because qmcReadRaw never
+# returned, but it's exactly right as the second half of the recovery
+# stack now that Wire returns false on timeout.
+#
+# See gh issue #43 and docs/wire-i2c-timeout-plan.md.
+
+MAG_H_OLD = (
+    "// Logging cadence\n"
+    "    uint32_t lastLogMs = 0;\n"
+)
+MAG_H_NEW = (
+    "// Logging cadence\n"
+    "    uint32_t lastLogMs = 0;\n"
+    "    uint8_t  qmcFailCount = 0;  // ff-builder: consecutive read-failure counter for bus reset\n"
+)
+
+MAG_READ_OLD = (
+    "// Read MAG (bus-agnostic)\n"
+    "    int16_t rx, ry, rz;\n"
+    "    if (!qmcReadRaw(*magBus, magAddr, rx, ry, rz)) {\n"
+    "        LOG_INFO(\"[Magnetometer] QMC read failed; will retry.\");\n"
+    "        return 100;\n"
+    "    }\n"
+)
+MAG_READ_NEW = """\
+// Read MAG (bus-agnostic)
+    int16_t rx, ry, rz;
+    if (!qmcReadRaw(*magBus, magAddr, rx, ry, rz)) {
+        qmcFailCount++;
+        LOG_INFO("[Magnetometer] QMC read failed (streak %d).", (int)qmcFailCount);
+        if (qmcFailCount >= 3) {
+            LOG_INFO("[Magnetometer] Resetting I2C bus after %d consecutive failures.", (int)qmcFailCount);
+            magBus->end();
+            magBus->begin();
+            qmcInit(*magBus, magAddr);
+            qmcFailCount = 0;
+        }
+        return 100;
+    }
+    qmcFailCount = 0;
+"""
+
+
+def patch_mag_i2c_timeout():
+    # Idempotent: skip if the post-patch sentinel is already present.
+    h_existing = open(MAG_MODULE_H).read()
+    if "qmcFailCount" in h_existing:
+        print(f"Skipped {MAG_MODULE_H} + {MAG_MODULE_CPP}: already patched")
+        return
+
+    checks = [
+        (MAG_MODULE_H,   MAG_H_OLD),
+        (MAG_MODULE_CPP, MAG_READ_OLD),
+    ]
+    for path, old in checks:
+        src = open(path).read()
+        if old not in src:
+            print(f"ERROR: mag_i2c_timeout OLD string not found in {path}", file=sys.stderr)
+            sys.exit(1)
+
+    h = h_existing.replace(MAG_H_OLD, MAG_H_NEW, 1)
+    with open(MAG_MODULE_H, "w") as f:
+        f.write(h)
+
+    cpp = open(MAG_MODULE_CPP).read()
+    cpp = cpp.replace(MAG_READ_OLD, MAG_READ_NEW, 1)
+    with open(MAG_MODULE_CPP, "w") as f:
+        f.write(cpp)
+
+    print(f"Patched {MAG_MODULE_H} + {MAG_MODULE_CPP}: mag I2C timeout/bus-reset recovery")
+
+
 if __name__ == "__main__":
     patch_variant_ini()
     patch_friend_finder_include()
@@ -1823,3 +1911,4 @@ if __name__ == "__main__":
     patch_menu_ordering()
     patch_compass_redesign()
     patch_wire_nrf52_timeouts()
+    patch_mag_i2c_timeout()
