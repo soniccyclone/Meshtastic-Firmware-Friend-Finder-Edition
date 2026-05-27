@@ -1,0 +1,14 @@
+bleak==3.0.2
+certifi==2026.5.20
+charset-normalizer==3.4.7
+dbus-fast==5.0.16
+idna==3.16
+meshtastic==2.7.8
+packaging==24.2
+protobuf==7.35.0
+Pypubsub==4.0.7
+pyserial==3.5
+PyYAML==6.0.3
+requests==2.34.2
+tabulate==0.9.0
+urllib3==2.7.0
