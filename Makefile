@@ -7,23 +7,48 @@ IMAGE         ?= ff-builder
 OUTPUT_DIR    := $(REPO_DIR)/firmware/heltec_t114
 OUTPUT        := $(OUTPUT_DIR)/firmware.uf2
 
-.PHONY: help setup image rebuild build shell clean
+# Local devloop scratch — gitignored. patched-src and compile both land here so
+# nothing host-side needs installing beyond podman.
+OUT_DIR         := $(REPO_DIR)/output
+PATCHED_SRC_DIR := $(OUT_DIR)/patched-src
+COMPILED_FW     := $(OUT_DIR)/firmware.uf2
+
+# Host-side Python testbed for talking to a flashed device over USB serial.
+TESTBED_DIR  := $(REPO_DIR)/testbed
+TESTBED_REQS := $(TESTBED_DIR)/requirements.txt
+VENV         := $(TESTBED_DIR)/.venv
+VENV_PIP     := $(VENV)/bin/pip
+VENV_MESH    := $(VENV)/bin/meshtastic
+LOG_DIR      := $(OUT_DIR)/logs
+PORT         ?= /dev/ttyACM0
+
+.PHONY: help setup image rebuild build shell clean patched-src compile testbed-venv meshtastic-log
 
 help:
 	@echo "ff-builder — T114 firmware devloop"
 	@echo
 	@echo "Targets:"
-	@echo "  make build    — compile T114 firmware (runs setup + image if needed)"
-	@echo "  make setup    — clone LeapYeet/firmware into \$$FIRMWARE_SRC if missing"
-	@echo "  make image    — build the $(IMAGE) container image if missing"
-	@echo "  make rebuild  — force-rebuild the container image (--no-cache)"
-	@echo "  make shell    — drop into a shell inside the image"
-	@echo "  make clean    — remove the built firmware.uf2 artifact"
+	@echo "  make build       — compile T114 firmware via build.sh → $(OUTPUT)"
+	@echo "  make compile     — compile T114 firmware → $(COMPILED_FW)"
+	@echo "  make patched-src — dump the post-patch source tree to $(PATCHED_SRC_DIR)"
+	@echo "  make setup       — clone LeapYeet/firmware into \$$FIRMWARE_SRC if missing"
+	@echo "  make image       — build the $(IMAGE) container image if missing"
+	@echo "  make rebuild     — force-rebuild the container image (--no-cache)"
+	@echo "  make shell       — drop into a shell inside the image"
+	@echo "  make clean         — remove the built firmware.uf2 artifact + output/ scratch"
+	@echo
+	@echo "Testbed (host-side, talks to a flashed device):"
+	@echo "  make testbed-venv  — create/refresh $(VENV) from $(TESTBED_REQS)"
+	@echo "  make meshtastic-log — stream $(PORT) debug serial → $(LOG_DIR)/meshtastic-<ts>.log"
+	@echo "                       (latest.log symlink updated; override with PORT=/dev/ttyXXX)"
 	@echo
 	@echo "Env:"
 	@echo "  FIRMWARE_SRC = $(FIRMWARE_SRC)"
 	@echo "  IMAGE        = $(IMAGE)"
 	@echo "  OUTPUT       = $(OUTPUT)"
+	@echo "  OUT_DIR      = $(OUT_DIR)"
+	@echo "  PORT         = $(PORT)"
+	@echo "  LOG_DIR      = $(LOG_DIR)"
 
 setup:
 	@if [ ! -d "$(FIRMWARE_SRC)" ]; then \
@@ -56,5 +81,66 @@ shell:
 	  --entrypoint /bin/bash \
 	  $(IMAGE)
 
+# Apply patch-t114.py to the baked-in /firmware-src inside the container, then
+# dump the resulting tree (minus .git and .pio) to $(PATCHED_SRC_DIR). The mount
+# is wiped first so the dump always reflects the current patch script.
+patched-src: image
+	@mkdir -p "$(PATCHED_SRC_DIR)"
+	@rm -rf "$(PATCHED_SRC_DIR)"/*
+	@echo "[patched-src] applying patches and dumping tree to $(PATCHED_SRC_DIR)..."
+	podman run --rm \
+	  -v "$(PATCHED_SRC_DIR)":/output-src:Z \
+	  --entrypoint /bin/bash \
+	  $(IMAGE) -c 'set -euo pipefail; \
+	    cd /firmware-src; \
+	    python3 /usr/local/bin/patch-t114.py; \
+	    echo "[patched-src] copying tree (excluding .git, .pio)..."; \
+	    tar --exclude=./.git --exclude=./.pio -cf - -C /firmware-src . \
+	      | tar -xf - -C /output-src; \
+	  '
+	@echo "[patched-src] done: $(PATCHED_SRC_DIR)"
+
+# Compile firmware using the baked-in pinned LeapYeet source. Same payload as
+# `make build` (which routes through build.sh into firmware/heltec_t114/), but
+# writes to the gitignored $(OUT_DIR) for ad-hoc devloop use.
+compile: image
+	@mkdir -p "$(OUT_DIR)"
+	podman run --rm \
+	  -v "$(OUT_DIR)":/output:Z \
+	  $(IMAGE)
+	@echo "[compile] done: $(COMPILED_FW)"
+
+# Create / refresh the host-side Python venv. Re-runs pip install whenever
+# requirements.txt is newer than the meshtastic entry-point binary.
+$(VENV_MESH): $(TESTBED_REQS)
+	@if [ ! -x "$(VENV)/bin/python" ]; then \
+	  echo "[testbed-venv] creating $(VENV)..."; \
+	  python3 -m venv "$(VENV)"; \
+	fi
+	@echo "[testbed-venv] installing $(TESTBED_REQS)..."
+	"$(VENV_PIP)" install -r "$(TESTBED_REQS)"
+	@touch "$(VENV_MESH)"
+
+testbed-venv: $(VENV_MESH)
+
+# Capture the firmware's SerialConsole debug stream to a timestamped logfile
+# under $(LOG_DIR), and update $(LOG_DIR)/latest.log → that file. Runs until
+# Ctrl-C. --noproto tells the firmware "no protobuf client here, just dump
+# the human-readable debug console."
+meshtastic-log: $(VENV_MESH)
+	@mkdir -p "$(LOG_DIR)"
+	@if [ ! -e "$(PORT)" ]; then \
+	  echo "[meshtastic-log] no device at $(PORT) — plug it in or pass PORT=/dev/ttyXXX"; \
+	  exit 1; \
+	fi
+	@ts=$$(date +%Y-%m-%dT%H-%M-%S); \
+	logname="meshtastic-$$ts.log"; \
+	logfile="$(LOG_DIR)/$$logname"; \
+	ln -sfn "$$logname" "$(LOG_DIR)/latest.log"; \
+	echo "[meshtastic-log] $(PORT) → $$logfile"; \
+	echo "[meshtastic-log] tail with: tail -f $(LOG_DIR)/latest.log    (Ctrl-C this run to stop)"; \
+	PYTHONUNBUFFERED=1 "$(VENV_MESH)" --port "$(PORT)" --noproto 2>&1 | tee "$$logfile"
+
 clean:
 	rm -f "$(OUTPUT)"
+	rm -rf "$(OUT_DIR)"
