@@ -82,23 +82,33 @@ shell:
 	  $(IMAGE)
 
 # Apply patch-t114.py to the baked-in /firmware-src inside the container, then
-# dump the resulting tree (minus .git and .pio) to $(PATCHED_SRC_DIR). The mount
-# is wiped first so the dump always reflects the current patch script.
+# dump three artifacts to $(OUT_DIR):
+#   patched-src/   — full post-patch tree (minus .git and .pio)
+#   patches.diff   — `git diff` of exactly what patch-t114.py changed
+#   patches.stat   — `git diff --stat` summary (one line per touched file)
+# Wiped first so output always reflects the current patch script.
 patched-src: image
+	@mkdir -p "$(OUT_DIR)"
+	@rm -rf "$(PATCHED_SRC_DIR)" "$(OUT_DIR)/patches.diff" "$(OUT_DIR)/patches.stat"
 	@mkdir -p "$(PATCHED_SRC_DIR)"
-	@rm -rf "$(PATCHED_SRC_DIR)"/*
-	@echo "[patched-src] applying patches and dumping tree to $(PATCHED_SRC_DIR)..."
+	@echo "[patched-src] applying patches and dumping tree + diff..."
 	podman run --rm \
-	  -v "$(PATCHED_SRC_DIR)":/output-src:Z \
+	  -v "$(OUT_DIR)":/output:Z \
 	  --entrypoint /bin/bash \
 	  $(IMAGE) -c 'set -euo pipefail; \
 	    cd /firmware-src; \
 	    python3 /usr/local/bin/patch-t114.py; \
+	    git add -N . >/dev/null; \
+	    git -c core.pager=cat diff --no-color --submodule=diff > /output/patches.diff; \
+	    git -c core.pager=cat diff --stat --no-color > /output/patches.stat; \
 	    echo "[patched-src] copying tree (excluding .git, .pio)..."; \
 	    tar --exclude=./.git --exclude=./.pio -cf - -C /firmware-src . \
-	      | tar -xf - -C /output-src; \
+	      | tar -xf - -C /output/patched-src; \
 	  '
-	@echo "[patched-src] done: $(PATCHED_SRC_DIR)"
+	@echo "[patched-src] done:"
+	@echo "  tree: $(PATCHED_SRC_DIR)"
+	@echo "  diff: $(OUT_DIR)/patches.diff   (full unified diff)"
+	@echo "  stat: $(OUT_DIR)/patches.stat   (per-file change summary)"
 
 # Compile firmware using the baked-in pinned LeapYeet source. Same payload as
 # `make build` (which routes through build.sh into firmware/heltec_t114/), but
@@ -127,10 +137,20 @@ testbed-venv: $(VENV_MESH)
 # under $(LOG_DIR), and update $(LOG_DIR)/latest.log → that file. Runs until
 # Ctrl-C. --noproto tells the firmware "no protobuf client here, just dump
 # the human-readable debug console."
+#
+# `sg dialout -c` runs the capture inside the dialout group regardless of
+# whether the calling shell inherited it — needed because adding yourself to
+# dialout via usermod doesn't propagate into already-open shells. This is
+# transparent if you already have dialout active.
 meshtastic-log: $(VENV_MESH)
 	@mkdir -p "$(LOG_DIR)"
 	@if [ ! -e "$(PORT)" ]; then \
 	  echo "[meshtastic-log] no device at $(PORT) — plug it in or pass PORT=/dev/ttyXXX"; \
+	  exit 1; \
+	fi
+	@if ! getent group dialout | grep -qw "$$(id -un)"; then \
+	  echo "[meshtastic-log] $$(id -un) is not in the dialout group system-wide."; \
+	  echo "[meshtastic-log] Fix: sudo usermod -aG dialout $$(id -un)  (then re-login once)"; \
 	  exit 1; \
 	fi
 	@ts=$$(date +%Y-%m-%dT%H-%M-%S); \
@@ -139,7 +159,7 @@ meshtastic-log: $(VENV_MESH)
 	ln -sfn "$$logname" "$(LOG_DIR)/latest.log"; \
 	echo "[meshtastic-log] $(PORT) → $$logfile"; \
 	echo "[meshtastic-log] tail with: tail -f $(LOG_DIR)/latest.log    (Ctrl-C this run to stop)"; \
-	PYTHONUNBUFFERED=1 "$(VENV_MESH)" --port "$(PORT)" --noproto 2>&1 | tee "$$logfile"
+	sg dialout -c "PYTHONUNBUFFERED=1 '$(VENV_MESH)' --port '$(PORT)' --noproto 2>&1 | tee '$$logfile'"
 
 clean:
 	rm -f "$(OUTPUT)"
