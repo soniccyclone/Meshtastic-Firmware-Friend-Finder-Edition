@@ -29,8 +29,9 @@ help:
 	@echo
 	@echo "Targets:"
 	@echo "  make build       — compile T114 firmware via build.sh → $(OUTPUT)"
-	@echo "  make compile     — compile T114 firmware → $(COMPILED_FW)"
 	@echo "  make patched-src — dump the post-patch source tree to $(PATCHED_SRC_DIR)"
+	@echo "  make compile     — compile $(PATCHED_SRC_DIR) → $(COMPILED_FW)"
+	@echo "                     (devloop: patched-src → hand-edit → compile)"
 	@echo "  make setup       — clone LeapYeet/firmware into \$$FIRMWARE_SRC if missing"
 	@echo "  make image       — build the $(IMAGE) container image if missing"
 	@echo "  make rebuild     — force-rebuild the container image (--no-cache)"
@@ -110,14 +111,32 @@ patched-src: image
 	@echo "  diff: $(OUT_DIR)/patches.diff   (full unified diff)"
 	@echo "  stat: $(OUT_DIR)/patches.stat   (per-file change summary)"
 
-# Compile firmware using the baked-in pinned LeapYeet source. Same payload as
-# `make build` (which routes through build.sh into firmware/heltec_t114/), but
-# writes to the gitignored $(OUT_DIR) for ad-hoc devloop use.
+# Compile firmware from the host-side patched source tree at $(PATCHED_SRC_DIR).
+# Devloop: `make patched-src` (dumps tree + patches.diff to $(OUT_DIR)) →
+# hand-edit files under $(PATCHED_SRC_DIR) → `make compile` builds that exact
+# tree. The dir is bind-mounted over /firmware-src so the image's stock
+# entrypoint (which would re-run patch-t114.py) is overridden with an inline
+# `pio run`. PlatformIO's platforms + toolchain live in /root/.platformio
+# inside the image, so they persist across compiles; libdeps install into
+# $(PATCHED_SRC_DIR)/.pio/libdeps on first compile and persist after that.
 compile: image
+	@if [ ! -d "$(PATCHED_SRC_DIR)" ]; then \
+	  echo "[compile] $(PATCHED_SRC_DIR) missing — run 'make patched-src' first."; \
+	  exit 1; \
+	fi
 	@mkdir -p "$(OUT_DIR)"
 	podman run --rm \
+	  -v "$(PATCHED_SRC_DIR)":/firmware-src:Z \
 	  -v "$(OUT_DIR)":/output:Z \
-	  $(IMAGE)
+	  --entrypoint /bin/bash \
+	  $(IMAGE) -c 'set -euo pipefail; \
+	    cd /firmware-src; \
+	    echo "=== Building heltec-mesh-node-t114 from $(PATCHED_SRC_DIR) ==="; \
+	    pio run --environment heltec-mesh-node-t114; \
+	    echo "=== Copying artifact ==="; \
+	    cp .pio/build/heltec-mesh-node-t114/firmware.uf2 /output/firmware.uf2; \
+	    echo "Done: /output/firmware.uf2"; \
+	  '
 	@echo "[compile] done: $(COMPILED_FW)"
 
 # Create / refresh the host-side Python venv. Re-runs pip install whenever
