@@ -1835,11 +1835,13 @@ MAG_MODULE_H   = "src/modules/MagnetometerModule.h"
 #           is 8G — we want true 2G (00). Earth's field is ~0.5 G so 2 G
 #           full-scale gives 4x headroom and better SNR.
 #
-#   ff-h3y  Lower the polling cadence from 50 ms (20 Hz) to 125 ms (8 Hz).
-#           Originally landed at 250 ms (4 Hz); doubled to 8 Hz under ff-1vz
-#           because 4 Hz looked visibly choppy on the compass needle while
-#           the screen redraws at ~20 Hz. 8 Hz still halves I2C traffic vs.
-#           upstream, keeping most of the RF-glitch resilience benefit.
+#   ff-h3y  Lower the polling cadence from 50 ms (20 Hz) to 60 ms (~16 Hz).
+#           Originally landed at 250 ms (4 Hz); 4 Hz looked visibly choppy
+#           against the 20 Hz screen redraw, 8 Hz still stepped, and ODR
+#           changes don't help once polling is the limiter. 60 ms is just
+#           below the redraw period so the needle reads as continuous while
+#           still cutting I2C traffic ~17% vs. upstream — leaving some of
+#           the RF-glitch resilience headroom ff-p5s/ff-c2w were buying.
 #
 #   ff-hfa  Disciplined recovery: increment a streak counter on each read
 #           failure; at streak == 5 (~1.25 s of bad bus) attempt ONE
@@ -1966,12 +1968,13 @@ QMC_RES_TAIL_NEW = (
     "        lastLogMs = now;\n"
     "    }\n"
     "\n"
-    "    // ff-builder (ff-1vz): 125ms (8Hz) — doubles compass-needle smoothness\n"
-    "    // vs. the previous 250ms/4Hz cadence while still halving I2C traffic vs.\n"
-    "    // upstream's 50ms/20Hz. Magnetometer ODR is 50Hz so fresh data is\n"
-    "    // available every poll; the bottleneck was the screen rendering stale\n"
-    "    // readings between samples.\n"
-    "    return 125;\n"
+    "    // ff-builder (ff-1vz): 60ms (~16Hz). Compass screen redraws at 20Hz so\n"
+    "    // anything slower than ~50ms shows stepped motion; 60ms keeps the gap\n"
+    "    // small enough to read as continuous while still cutting I2C traffic\n"
+    "    // ~17% vs. upstream's 50ms/20Hz cadence (which got us into the RF-glitch\n"
+    "    // trouble that ff-h3y/ff-p5s/ff-c2w hardened against). Magnetometer ODR\n"
+    "    // is 50Hz so fresh data lands every poll.\n"
+    "    return 60;\n"
     "}\n"
 )
 
@@ -2006,7 +2009,7 @@ def patch_qmc_resilience():
         f.write(cpp_new)
 
     print(f"Patched {MAG_MODULE_H} + {MAG_MODULE_CPP}: QMC resilience "
-          f"(ODR 200->50Hz, polling 50->125ms, safety-net recovery)")
+          f"(ODR 200->50Hz, polling 50->60ms, safety-net recovery)")
 
 
 # --- ff-bt6: shared bus-recovery helper + boot-time calls -----------------
