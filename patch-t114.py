@@ -1922,36 +1922,14 @@ QMC_RES_READ_NEW = """\
         qmcFailCount++;
         LOG_INFO("[Magnetometer] QMC read failed (streak %d).", (int)qmcFailCount);
         if (qmcFailCount == 5) {
-            // ff-builder (ff-p5s + ff-c2w): bit-bang 9-clock SCL unstick
-            // BEFORE the TWIM bounce. magBus->end()/begin() resets only
-            // the master; if the slave is clamping SDA low (the common
-            // RF-glitch lockup mode) the master reinits into a still-stuck
-            // bus. Walking SCL manually walks the slave's state machine
-            // out to a clean STOP, then we hand the pins back to the
-            // peripheral and reconfigure the chip.
-            LOG_WARN("[Magnetometer] Bus stuck. Bit-bang unstick + bounce %s + QMC reinit...",
+            // ff-builder (ff-p5s + ff-c2w + ff-bt6): shared bus-recovery
+            // helper. Bit-bangs 9 SCL clocks with SDA released to walk a
+            // clamping slave out of mid-byte, issues a manual STOP, then
+            // bounces the TWIM. Master-side end()/begin() alone can't free
+            // a slave holding SDA low (the common RF-glitch lockup mode).
+            LOG_WARN("[Magnetometer] Bus stuck. Recovering %s + QMC reinit...",
                      (magBus == &Wire) ? "Wire" : "Wire1");
-            const int sclPin = (magBus == &Wire) ? I2C0_SCL_PIN : I2C1_SCL_PIN;
-            const int sdaPin = (magBus == &Wire) ? I2C0_SDA_PIN : I2C1_SDA_PIN;
-            magBus->end();
-            pinMode(sdaPin, INPUT_PULLUP);
-            pinMode(sclPin, INPUT_PULLUP);
-            delayMicroseconds(10);
-            for (int i = 0; i < 9; ++i) {
-                pinMode(sclPin, OUTPUT);
-                digitalWrite(sclPin, LOW);
-                delayMicroseconds(5);
-                pinMode(sclPin, INPUT_PULLUP);
-                delayMicroseconds(5);
-                if (digitalRead(sdaPin) == HIGH) break;
-            }
-            // Manual STOP condition: SDA low -> high while SCL high.
-            pinMode(sdaPin, OUTPUT);
-            digitalWrite(sdaPin, LOW);
-            delayMicroseconds(5);
-            pinMode(sdaPin, INPUT_PULLUP);
-            delayMicroseconds(5);
-            magBus->begin();
+            recoverI2cBus(*magBus);
             // ff-builder (ff-c2w): honor qmcInit retval. On success, clear
             // the streak so the chip gets a fresh budget. On failure, leave
             // the counter at 5 — the next failed read tips us to permadeath
@@ -2026,6 +2004,90 @@ def patch_qmc_resilience():
 
     print(f"Patched {MAG_MODULE_H} + {MAG_MODULE_CPP}: QMC resilience "
           f"(ODR 200->50Hz, polling 50->250ms, safety-net recovery)")
+
+
+# --- ff-bt6: shared bus-recovery helper + boot-time calls -----------------
+#
+# Captured T114 boot log showed every address 0x08..0x77 on Wire timing out
+# (TWIM peripheral wedged from a prior session's mid-transaction soft reset).
+# The runtime recovery in patch_qmc_resilience() only fires after 5 read
+# failures in runOnce — but at boot we never get there: selectMagOnEitherBus
+# fails the probe loop, haveMag stays false, the read loop is unreachable.
+#
+# Extract the bit-bang + STOP sequence into a static helper recoverI2cBus()
+# and call it (a) for BOTH buses at the top of selectMagOnEitherBus before
+# probing — handles boot-time stuck bus — and (b) from the runtime recovery
+# branch instead of inlining the same logic. DRY refactor that ff-iy5
+# claimed to land in 2026-05-24 but never actually shipped.
+
+MAG_HELPER_DEF = """\
+// ff-builder (ff-bt6): shared bus-recovery helper. Toggles SCL 9 times
+// with SDA released to walk a clamping slave's I2C state machine out
+// of mid-byte (the common post-soft-reset failure mode where the QMC
+// stays mid-transaction across firmware resets), then issues a manual
+// STOP and hands the pins back to the TWIM peripheral. Safe on a
+// healthy bus — adds ~100us and exits early when SDA reads HIGH.
+static void recoverI2cBus(TwoWire &bus) {
+    const int sclPin = (&bus == &Wire) ? I2C0_SCL_PIN : I2C1_SCL_PIN;
+    const int sdaPin = (&bus == &Wire) ? I2C0_SDA_PIN : I2C1_SDA_PIN;
+    bus.end();
+    pinMode(sdaPin, INPUT_PULLUP);
+    pinMode(sclPin, INPUT_PULLUP);
+    delayMicroseconds(10);
+    for (int i = 0; i < 9; ++i) {
+        pinMode(sclPin, OUTPUT);
+        digitalWrite(sclPin, LOW);
+        delayMicroseconds(5);
+        pinMode(sclPin, INPUT_PULLUP);
+        delayMicroseconds(5);
+        if (digitalRead(sdaPin) == HIGH) break;
+    }
+    // Manual STOP: SDA low -> high while SCL high.
+    pinMode(sdaPin, OUTPUT);
+    digitalWrite(sdaPin, LOW);
+    delayMicroseconds(5);
+    pinMode(sdaPin, INPUT_PULLUP);
+    delayMicroseconds(5);
+    bus.begin();
+}
+
+"""
+
+RECOVER_HELPER_ANCHOR = "bool MagnetometerModule::selectMagOnEitherBus() {"
+
+SELECT_HEAD_OLD = """bool MagnetometerModule::selectMagOnEitherBus() {
+    struct Probe {"""
+
+SELECT_HEAD_NEW = """bool MagnetometerModule::selectMagOnEitherBus() {
+    // ff-builder (ff-bt6): unstick BOTH buses before probing. Soft reset
+    // does not power-cycle the QMC; if a prior session left the chip
+    // mid-byte it stays clamping SDA low across the firmware boot and
+    // every address probe times out. Bit-bang both buses to clear any
+    // such residue before we look for the magnetometer.
+    LOG_INFO("[Magnetometer] Pre-probe bus recovery on Wire and Wire1.");
+    recoverI2cBus(Wire);
+    recoverI2cBus(Wire1);
+
+    struct Probe {"""
+
+
+def patch_qmc_boot_recovery():
+    src = open(MAG_MODULE_CPP).read()
+    if "static void recoverI2cBus" in src:
+        print(f"Skipped {MAG_MODULE_CPP}: ff-bt6 boot recovery already patched")
+        return
+    if RECOVER_HELPER_ANCHOR not in src:
+        sys.exit(f"ERROR: ff-bt6 anchor (selectMagOnEitherBus signature) "
+                 f"missing in {MAG_MODULE_CPP}")
+    if SELECT_HEAD_OLD not in src:
+        sys.exit(f"ERROR: ff-bt6 anchor (selectMagOnEitherBus head) "
+                 f"missing in {MAG_MODULE_CPP}")
+    src = src.replace(RECOVER_HELPER_ANCHOR, MAG_HELPER_DEF + RECOVER_HELPER_ANCHOR, 1)
+    src = src.replace(SELECT_HEAD_OLD, SELECT_HEAD_NEW, 1)
+    with open(MAG_MODULE_CPP, "w") as f:
+        f.write(src)
+    print(f"Patched {MAG_MODULE_CPP}: ff-bt6 recoverI2cBus helper + "
+          f"pre-probe calls in selectMagOnEitherBus")
 
 
 # --- Trim friendFinderBaseMenu (ff-iic) -----------------------------------
@@ -2580,6 +2642,7 @@ if __name__ == "__main__":
     patch_compass_redesign()
     patch_wire_nrf52_timeouts()
     patch_qmc_resilience()
+    patch_qmc_boot_recovery()
     patch_trim_friend_finder_menu()
     patch_captain_compass_rename()
     patch_friend_finder_places_persistence()
