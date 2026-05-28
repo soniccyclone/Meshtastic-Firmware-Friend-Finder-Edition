@@ -1843,12 +1843,30 @@ MAG_MODULE_H   = "src/modules/MagnetometerModule.h"
 #
 #   ff-hfa  Disciplined recovery: increment a streak counter on each read
 #           failure; at streak == 5 (~1.25 s of bad bus) attempt ONE
-#           recovery (magBus->end() + brief delay + magBus->begin() +
-#           qmcInit()) — no bit-bang, no Wire-side recovery. If the very
-#           next read still fails (streak >= 6), set headingIsValid=false
-#           so the existing if(!headingIsValid) early-exit takes over and
-#           the mag stays quiet until reboot. NO preemptive recovery at
-#           boot — only after observed runtime failure.
+#           recovery. Originally master-side only (magBus->end()/begin() +
+#           qmcInit()); see ff-p5s + ff-c2w below for the slave-side
+#           additions. If the very next read still fails (streak >= 6),
+#           set headingIsValid=false so the existing if(!headingIsValid)
+#           early-exit takes over and the mag stays quiet until reboot.
+#           NO preemptive recovery at boot — only after observed runtime
+#           failure.
+#
+#   ff-p5s  Bit-bang 9-clock SCL unstick BEFORE the TWIM master bounce.
+#           magBus->end()/begin() resets only the nRF52 TWIM peripheral;
+#           if the QMC slave is clamping SDA low (the common RF-glitch
+#           lockup mode) the master reinits into a still-stuck bus. Walk
+#           SCL manually as GPIO with SDA released, breaking out as soon
+#           as the slave releases SDA, then a manual STOP, then hand the
+#           pins back to the peripheral.
+#
+#   ff-c2w  Three correctness gaps in the recovery block: (a) all-zero
+#           raw reads were treated as success (a half-stuck bus produces
+#           ACK + 0,0,0 — heading stuck at 360 deg); (b) qmcInit retval
+#           was discarded so a still-stuck bus after recovery looked OK;
+#           (c) qmcFailCount was not reset after recovery so a single
+#           subsequent failure latched permadeath with zero grace. Fix:
+#           treat all-zero as a read failure, branch on qmcInit retval,
+#           reset the counter only on successful reinit.
 #
 # Together (1)+(2) should collapse the failure rate to "occasionally needs
 # recovery" instead of "needs recovery within 70 seconds, every time."
@@ -1893,18 +1911,57 @@ QMC_RES_READ_OLD = (
 QMC_RES_READ_NEW = """\
 // Read MAG (bus-agnostic)
     int16_t rx, ry, rz;
-    if (!qmcReadRaw(*magBus, magAddr, rx, ry, rz)) {
+    bool readOk = qmcReadRaw(*magBus, magAddr, rx, ry, rz);
+    // ff-builder (ff-c2w): all-zeros guard. A half-stuck bus can return
+    // ACK + (0,0,0); without this the success path resets qmcFailCount
+    // and recovery never fires, leaving heading stuck at 360 deg forever.
+    if (readOk && rx == 0 && ry == 0 && rz == 0) {
+        readOk = false;
+    }
+    if (!readOk) {
         qmcFailCount++;
         LOG_INFO("[Magnetometer] QMC read failed (streak %d).", (int)qmcFailCount);
         if (qmcFailCount == 5) {
-            // ff-builder (gh #43): one recovery attempt — bus bounce +
-            // chip reconfigure. No bit-bang, no Wire-side recovery.
-            LOG_WARN("[Magnetometer] Bus stuck. Bouncing %s and reinitializing QMC...",
+            // ff-builder (ff-p5s + ff-c2w): bit-bang 9-clock SCL unstick
+            // BEFORE the TWIM bounce. magBus->end()/begin() resets only
+            // the master; if the slave is clamping SDA low (the common
+            // RF-glitch lockup mode) the master reinits into a still-stuck
+            // bus. Walking SCL manually walks the slave's state machine
+            // out to a clean STOP, then we hand the pins back to the
+            // peripheral and reconfigure the chip.
+            LOG_WARN("[Magnetometer] Bus stuck. Bit-bang unstick + bounce %s + QMC reinit...",
                      (magBus == &Wire) ? "Wire" : "Wire1");
+            const int sclPin = (magBus == &Wire) ? I2C0_SCL_PIN : I2C1_SCL_PIN;
+            const int sdaPin = (magBus == &Wire) ? I2C0_SDA_PIN : I2C1_SDA_PIN;
             magBus->end();
-            delay(5);
+            pinMode(sdaPin, INPUT_PULLUP);
+            pinMode(sclPin, INPUT_PULLUP);
+            delayMicroseconds(10);
+            for (int i = 0; i < 9; ++i) {
+                pinMode(sclPin, OUTPUT);
+                digitalWrite(sclPin, LOW);
+                delayMicroseconds(5);
+                pinMode(sclPin, INPUT_PULLUP);
+                delayMicroseconds(5);
+                if (digitalRead(sdaPin) == HIGH) break;
+            }
+            // Manual STOP condition: SDA low -> high while SCL high.
+            pinMode(sdaPin, OUTPUT);
+            digitalWrite(sdaPin, LOW);
+            delayMicroseconds(5);
+            pinMode(sdaPin, INPUT_PULLUP);
+            delayMicroseconds(5);
             magBus->begin();
-            (void)qmcInit(*magBus, magAddr);
+            // ff-builder (ff-c2w): honor qmcInit retval. On success, clear
+            // the streak so the chip gets a fresh budget. On failure, leave
+            // the counter at 5 — the next failed read tips us to permadeath
+            // as intended (no point letting a wedged chip masquerade alive).
+            if (qmcInit(*magBus, magAddr)) {
+                LOG_INFO("[Magnetometer] QMC reinit OK; clearing fail streak.");
+                qmcFailCount = 0;
+            } else {
+                LOG_WARN("[Magnetometer] QMC reinit failed after bus recovery.");
+            }
         } else if (qmcFailCount >= 6) {
             // Recovery did not bring the chip back. Mark disabled —
             // the existing if(!headingIsValid) early-exit in runOnce
