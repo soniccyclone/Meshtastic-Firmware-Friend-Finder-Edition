@@ -2096,6 +2096,90 @@ def patch_qmc_boot_recovery():
           f"pre-probe calls in selectMagOnEitherBus")
 
 
+# --- ff-070 (gh #60): auto-reinit while heading invalid -------------------
+#
+# Captured T114 logs (issue #60) show the magnetometer comes up dead in two
+# ways and then stays dead until the user power-cycles:
+#
+#   (a) Boot-time bus wedge. The platform I2C scan NAKs every address
+#       0x08..0x77 on port 2 ("Unknown error at address 0x..") — the TWIM
+#       is hung from a prior session's mid-transaction. initSensors() finds
+#       no mag, haveMag=false, headingIsValid=false.
+#   (b) Runtime permadeath. A read-failure streak hits >=6 (ff-c2w path) and
+#       runOnce() sets headingIsValid=false on purpose.
+#
+# In BOTH cases the if(!headingIsValid) branch in runOnce() just logs the
+# one-shot diagnostic and returns 500 forever — the comment says "try again"
+# but nothing ever does. We have not pinned down the underlying leak/race
+# (it's rare and we've failed to reproduce on the bench), so rather than keep
+# hunting we make the failure self-healing: on a slow cadence, re-run the full
+# detect path. selectMagOnEitherBus() already bit-bangs BOTH buses free via
+# recoverI2cBus() before probing, so a transient wedge — boot-time or runtime —
+# clears itself within one retry and the compass comes back without a reboot.
+#
+# Cost: while dead, we bounce I2C0 (shared with the OLED) every 5s. That same
+# bounce already happens once at boot inside selectMagOnEitherBus, and it only
+# repeats while the mag is actually down, so the trade is cheap. Quiet by
+# design — one "Pre-probe bus recovery" line per retry, nothing on the hot path.
+
+AUTO_REINIT_H_OLD = (
+    "    uint8_t  qmcFailCount = 0;  // ff-builder (gh #43): I2C read-failure streak\n"
+)
+AUTO_REINIT_H_NEW = (
+    "    uint8_t  qmcFailCount = 0;  // ff-builder (gh #43): I2C read-failure streak\n"
+    "    uint32_t lastReinitMs = 0;  // ff-builder (gh #60): last auto-reinit attempt while heading invalid\n"
+)
+
+AUTO_REINIT_CPP_OLD = (
+    "    if (!headingIsValid) {\n"
+    "        explainWhyHeadingInvalidOnce();\n"
+    "        return 500; // wait a bit and try again\n"
+    "    }\n"
+)
+AUTO_REINIT_CPP_NEW = """\
+    if (!headingIsValid) {
+        explainWhyHeadingInvalidOnce();
+        // ff-builder (gh #60): don't sit dark until the user power-cycles.
+        // The mag goes invalid either because the I2C bus was wedged at boot
+        // (initSensors found nothing) or because the streak>=6 permadeath path
+        // above tripped on a runtime glitch. Both are routinely transient, so
+        // retry the full detect on a slow cadence. selectMagOnEitherBus() runs
+        // recoverI2cBus() on BOTH buses first, bit-banging a clamping slave
+        // free, so a stuck bus heals itself here without a reboot.
+        static constexpr uint32_t kReinitRetryMs = 5000;
+        const uint32_t now = millis();
+        if (now - lastReinitMs >= kReinitRetryMs) {
+            lastReinitMs = now;
+            if (selectMagOnEitherBus()) {
+                haveMag          = true;
+                headingIsValid   = true;
+                qmcFailCount     = 0;
+                loggedWhyInvalid = false; // re-arm the one-shot diag for the next outage
+                LOG_INFO("[Magnetometer] Re-init succeeded; magnetometer back online.");
+            }
+        }
+        return 500; // wait a bit and try again
+    }
+"""
+
+
+def patch_qmc_auto_reinit():
+    h_src = open(MAG_MODULE_H).read()
+    cpp_src = open(MAG_MODULE_CPP).read()
+    if "lastReinitMs" in h_src or "gh #60): don't sit dark" in cpp_src:
+        print(f"Skipped {MAG_MODULE_H} + {MAG_MODULE_CPP}: ff-070 auto-reinit already patched")
+        return
+    if AUTO_REINIT_H_OLD not in h_src:
+        sys.exit(f"ERROR: ff-070 anchor (qmcFailCount header line) missing in {MAG_MODULE_H}")
+    if AUTO_REINIT_CPP_OLD not in cpp_src:
+        sys.exit(f"ERROR: ff-070 anchor (!headingIsValid early-exit) missing in {MAG_MODULE_CPP}")
+    with open(MAG_MODULE_H, "w") as f:
+        f.write(h_src.replace(AUTO_REINIT_H_OLD, AUTO_REINIT_H_NEW, 1))
+    with open(MAG_MODULE_CPP, "w") as f:
+        f.write(cpp_src.replace(AUTO_REINIT_CPP_OLD, AUTO_REINIT_CPP_NEW, 1))
+    print(f"Patched {MAG_MODULE_H} + {MAG_MODULE_CPP}: ff-070 auto-reinit while heading invalid")
+
+
 # --- Trim friendFinderBaseMenu (ff-iic) -----------------------------------
 #
 # Remove "Track a Friend" and "Dev Tools" from the Captain Compass menu.
@@ -2649,6 +2733,7 @@ if __name__ == "__main__":
     patch_wire_nrf52_timeouts()
     patch_qmc_resilience()
     patch_qmc_boot_recovery()
+    patch_qmc_auto_reinit()
     patch_trim_friend_finder_menu()
     patch_captain_compass_rename()
     patch_friend_finder_places_persistence()
