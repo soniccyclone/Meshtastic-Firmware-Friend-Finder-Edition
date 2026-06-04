@@ -345,3 +345,5 @@ It is a derivative work of:
 -   [meshtastic/firmware](https://github.com/meshtastic/firmware) — the official Meshtastic firmware (GPL-3.0)
 
 The firmware binaries distributed via this repository's [GitHub releases](https://github.com/soniccyclone/Meshtastic-Firmware-Friend-Finder-Edition/releases) are built from the source at [LeapYeet/firmware](https://github.com/LeapYeet/firmware) with the build-environment patches in [patch-t114.py](patch-t114.py) applied. Per GPL-3 §6, the corresponding source for any distributed binary is available at those upstream repositories plus this repository's patch scripts.
+
+Lol triggering a release with a readme edit real quick!
